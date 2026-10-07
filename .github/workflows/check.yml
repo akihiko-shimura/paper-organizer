@@ -1,0 +1,18 @@
+name: check
+on: [push, pull_request]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # 未定義名の検出。corroborate() が全リビジョンから消えていた事故はこれで赤になる。
+      - run: pipx run pyflakes organize.py
+      # 同定まわりのロジック検査。ネットワーク・PDF・OCR に触らないので ubuntu で動く。
+      - run: python3 organize.py selftest
+      # 再送層の実挙動。相手は localhost の偽サーバなので外に出ない。
+      - run: python3 retry_check.py
+      # 索引・キャッシュの書き込み。一時ディレクトリに書くだけで、本物の索引には触らない。
+      - run: python3 index_check.py
+      # ページの検証(有料 API)。偽のクライアントで --apply 無しに投入しないこと等。SDK もネットワークも使わない
+      - run: python3 vet.py --selftest

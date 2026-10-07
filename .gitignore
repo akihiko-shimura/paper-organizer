@@ -1,0 +1,41 @@
+# Your data. Never commit these: the index holds excerpts of the papers' text.
+papers.jsonl
+papers.jsonl.conflict-*
+papers.db
+backups/
+.cache/
+
+# Per-user settings (contact email etc.). Copy config.example.json to config.json.
+config.json
+
+# Work sheets and trails written by the commands
+unresolved.tsv
+unresolved-*.tsv
+unresolved.txt
+published.tsv
+review.html
+review-ok.tsv
+dedup-keep.txt
+renames-*.jsonl
+dedup-*.jsonl
+vet-results.jsonl
+vet-batches.json
+*.tmp[0-9]*
+
+# Your own regression cases for ladder_check.py (file names from your library)
+ladder_cases.json
+
+# Build products (compiled from vocr.swift / vec.swift on first use)
+vocr
+vec
+
+# Local-only files
+__pycache__/
+*.pyc
+data/
+testbed/
+scan.log
+.title.schema.json
+claude-session-log/
+leak-personal.txt
+leak-allow.txt

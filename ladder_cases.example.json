@@ -1,0 +1,14 @@
+[
+ [
+  "a-file-name-prefix.pdf",
+  "10.1234/expected.doi",
+  "bib_query",
+  "why this file is a regression case (free text)"
+ ],
+ [
+  "another-prefix",
+  null,
+  "unresolved",
+  "expected DOI null = must not resolve to anything"
+ ]
+]
