@@ -181,16 +181,17 @@ def check_review_cand(d):
     """F. 候補の列は記入ではない。ok=y の候補だけを書き、n は拒否として残し、雑誌として引けない候補は書かない。"""
     O.INDEX = os.path.join(d, "f.jsonl")
     O.REVIEW_TSV = os.path.join(d, "cand.tsv")
-    paths = ["/pre.pdf", "/y.pdf", "/n.pdf", "/thesis.pdf"]
+    paths = ["/pre.pdf", "/y.pdf", "/n.pdf", "/thesis.pdf", "/x.pdf", "/m.pdf", "/x0.pdf"]
     write(O.INDEX, [{"path": p, "rung": "unresolved"} for p in paths])
     head = ["reason", "path", "hint"] + O.CAND_COLS + O.REVIEW_COLS
     def row(p, cand, ok):
         v = dict(reason="B_", path=p, hint="t", cand_doi=cand, cand_title="t", cand_where="J", cand_year="2000", ok=ok)
         return "\t".join(v.get(h, "") for h in head) + "\n"
     tsv = "\t".join(head) + "\n" + row("/pre.pdf", "10.1/pre", "") + row("/y.pdf", "10.1/y", "y") + \
-        row("/n.pdf", "10.1/n", "n") + row("/thesis.pdf", "10.1/thesis", "y")
+        row("/n.pdf", "10.1/n", "n") + row("/thesis.pdf", "10.1/thesis", "y") + \
+        row("/x.pdf", "10.1/x", "x") + row("/m.pdf", "10.1/m", "m") + row("/x0.pdf", "", "x")
     open(O.REVIEW_TSV, "w").write(tsv)
-    assert [r[1] for r in O._read_review(O.REVIEW_TSV)[1]] == ["/y.pdf", "/n.pdf", "/thesis.pdf"], \
+    assert [r[1] for r in O._read_review(O.REVIEW_TSV)[1]] == ["/y.pdf", "/n.pdf", "/thesis.pdf", "/x.pdf", "/m.pdf", "/x0.pdf"], \
         "review が埋めた候補の列を記入と数えている(記入が 1 件も無くても review が止まる)"
     real = O.from_crossref
     O.from_crossref = lambda doi: None if doi == "10.1/thesis" else {"doi": doi, "year": 2000, "first_author": "A", "journal": "J"}
@@ -203,6 +204,15 @@ def check_review_cand(d):
     assert by["/n.pdf"]["rung"] == "unresolved" and by["/n.pdf"].get("cand_rejected") == ["10.1/n"], "ok=n の扱いが違う"
     assert by["/pre.pdf"]["rung"] == "unresolved" and not by["/pre.pdf"].get("doi"), "ok の無い候補を書いた"
     assert by["/thesis.pdf"]["rung"] == "unresolved", "雑誌として引けない候補で空の手入力の記録を作った"
+    # x: 論文ではない。同定せず、人手行きから外し、候補は二度と出さない。候補の無い行でも付けられる
+    for p in ("/x.pdf", "/x0.pdf"):
+        assert by[p]["rung"] == "unresolved" and by[p].get("not_paper") == "user" and not by[p].get("doi") \
+            and not O.needs_human(by[p]), "ok=x の扱いが違う: %s" % by[p]
+    assert by["/x.pdf"].get("cand_rejected") == ["10.1/x"], "論文ではないとした記録の候補を、拒否として残していない"
+    # m: 候補は正しいが、手元の PDF は出版前の原稿。y と同じに書き、原稿の印を付ける
+    assert by["/m.pdf"].get("doi") == "10.1/m" and by["/m.pdf"]["rung"] == "manual" \
+        and by["/m.pdf"].get("version_note") == "manuscript", "ok=m の扱いが違う: %s" % by["/m.pdf"]
+    assert not by["/y.pdf"].get("version_note") and not by["/y.pdf"].get("not_paper"), "y の記録に原稿・論文でないの印を付けた"
     left = [r[1] for r in O._unmerged(O.REVIEW_TSV, list(by.values()))]
     assert left == ["/thesis.pdf"], "merge 後に守る行が違う: %s" % left
     print("F ok: 候補の列は記入でなく、y だけ書き、n は拒否、雑誌として引けない候補は書かずに残す")

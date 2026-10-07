@@ -326,7 +326,7 @@ up as a repeating `error` instead of a silent miss, but must be removed by hand)
 | `move` | Moves files and the index together, inside the library root only; stops on a name collision |
 | `relocate` | After files were moved by hand: matches missing records to new files by name and by a fingerprint of the stored text; ambiguous matches are reported, not applied. `scan` refuses to run if new files look like moved ones, since re-identifying them would orphan hand-made corrections |
 | `fix` | One record. Sets `rung` to `manual`, which later automatic passes do not override |
-| `review` / `merge` | A sheet of the files that need a person, with a suggested candidate where one is found. A candidate is written only when the person marks it `y`; `n` is remembered and not offered again. A sheet with unmerged entries is never overwritten |
+| `review` / `merge` | A sheet of the files that need a person, with a suggested candidate where one is found. A candidate is written only when the person marks it `y` (or `m`: correct, but the file held is a pre-publication manuscript); `n` is remembered and not offered again; `x` marks the file as not a paper, which takes it out of the queue and out of the denominator of the resolution rate. A sheet with unmerged entries is never overwritten |
 | `views` | A separate folder of symlinks. On rebuild it deletes only a folder it created and that contains only links |
 
 Measured on the review candidates (title and first author read from the page, searched in Crossref): on 300 resolved

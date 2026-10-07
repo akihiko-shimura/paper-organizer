@@ -266,8 +266,12 @@ papers merge                                   # write the entries in unresolved
 papers rename --apply && papers index && papers views
 ```
 
-- The confirmation page: `y` correct, `n` wrong, `u` undo, `j` / `k` next / previous, `o` open the PDF. The decisions are saved in the browser,
-  so you can stop partway. Look at the journal and the year too when deciding (a different edition with the same title, or a paper with the same name as a thesis, can appear as a candidate)
+- The confirmation page: `y` correct, `m` correct (the PDF held is a pre-publication manuscript), `n` wrong candidate, `x` not a paper (a book excerpt,
+  lecture notes, a datasheet), `u` undo, `j` / `k` next / previous, `o` open the PDF. The decisions are saved in the browser, so you can stop partway.
+  Look at the journal and the year too when deciding (a different edition with the same title, or a paper with the same name as a thesis, can appear as a candidate)
+- `m` writes the bibliographic data just as `y` does and marks the record as a manuscript (`version_note: manuscript`). `x` does not identify the file; it marks
+  the record `not_paper` and takes it out of 人手行き (needs a person), so it does not appear in the next `review`, and `papers stats` also prints the resolution
+  rate with these excluded. For a row with no candidate, writing `x` in the `ok` column of `unresolved.tsv` has the same effect
 - Candidates are looked up with the title and first author that the optional page verification (`vet.py`) read. Records for which the verification was not run are less likely to get a candidate
 - For a row with no candidate, fill in the DOI in the `doi` column of `<repo>/unresolved.tsv`. For items with no DOI (theses, books), fill in
   columns such as `year`, `first_author` and `journal` directly. Edit the file with a text editor (saving it from Excel breaks the format)

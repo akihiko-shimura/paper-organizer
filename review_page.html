@@ -34,6 +34,8 @@ main { max-width: 900px; margin: 0 auto; padding: 16px; }
 .card.cur { outline: 2px solid var(--focus); outline-offset: 1px; }
 .card.y { border-left: 5px solid var(--y); }
 .card.n { border-left: 5px solid var(--n); }
+.card.m { border-left: 5px dashed var(--y); }
+.card.x { border-left: 5px solid var(--mute); opacity: .75; }
 .meta { color: var(--mute); font-size: 12px; display: flex; flex-wrap: wrap; gap: 4px 12px; overflow-wrap: anywhere; }
 .row { display: grid; grid-template-columns: 5.5em 1fr; gap: 2px 10px; margin-top: 8px; }
 .row .k { color: var(--mute); font-size: 12px; padding-top: 2px; }
@@ -41,6 +43,8 @@ main { max-width: 900px; margin: 0 auto; padding: 16px; }
 .pick { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
 .pick button.on-y { background: var(--y-bg); border-color: var(--y); color: var(--y); font-weight: 600; }
 .pick button.on-n { background: var(--n-bg); border-color: var(--n); color: var(--n); font-weight: 600; }
+.pick button.on-m { background: var(--y-bg); border-color: var(--y); color: var(--y); font-weight: 600; }
+.pick button.on-x { background: var(--line); border-color: var(--mute); color: var(--ink); font-weight: 600; }
 a { color: var(--focus); }
 kbd { font: 12px ui-monospace, monospace; border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
 </style>
@@ -58,7 +62,8 @@ kbd { font: 12px ui-monospace, monospace; border: 1px solid var(--line); border-
   <button class="primary" id="export">書き出す</button>
 </header>
 <main>
-  <p class="help"><kbd>y</kbd> 正しい ・ <kbd>n</kbd> 違う ・ <kbd>u</kbd> 取り消し ・ <kbd>j</kbd>/<kbd>k</kbd> 次・前 ・
+  <p class="help"><kbd>y</kbd> 正しい ・ <kbd>m</kbd> 正しい（出版前の原稿） ・ <kbd>n</kbd> 候補が違う ・
+    <kbd>x</kbd> 論文ではない（本の抜粋・講義ノート・資料） ・ <kbd>u</kbd> 取り消し ・ <kbd>j</kbd>/<kbd>k</kbd> 次・前 ・
     <kbd>o</kbd> PDF を開く。判定はこのブラウザに保存される。終わったら「書き出す」で review-ok.tsv を保存し、
     <code>python3 organize.py review-ok ~/Downloads/review-ok.tsv</code></p>
   <div id="list"></div>
@@ -107,9 +112,11 @@ function render() {
     doi.rel = "noopener";
     c.append(row("DOI", doi));
     const pk = el("div", "pick");
-    const by = el("button", p === "y" ? "on-y" : "", "y 正しい"), bn = el("button", p === "n" ? "on-n" : "", "n 違う");
+    const by = el("button", p === "y" ? "on-y" : "", "y 正しい"), bn = el("button", p === "n" ? "on-n" : "", "n 候補が違う");
+    const bm = el("button", p === "m" ? "on-m" : "", "m 正しい（原稿）"), bx = el("button", p === "x" ? "on-x" : "", "x 論文ではない");
     by.onclick = () => { set(i, "y"); }; bn.onclick = () => { set(i, "n"); };
-    pk.append(by, bn);
+    bm.onclick = () => { set(i, "m"); }; bx.onclick = () => { set(i, "x"); };
+    pk.append(by, bm, bn, bx);
     if (p) { const bu = el("button", null, "取り消し"); bu.onclick = () => set(i, null); pk.append(bu); }
     c.append(pk);
     c.onclick = e => { if (e.target.tagName !== "BUTTON" && e.target.tagName !== "A") { cur = i; mark(); } };
@@ -117,8 +124,8 @@ function render() {
   });
   const done = ROWS.filter(r => picks[id(r)]).length;
   document.getElementById("count").textContent =
-    done + " / " + ROWS.length + " 判定済み（y " + ROWS.filter(r => picks[id(r)] === "y").length +
-    " ・ n " + ROWS.filter(r => picks[id(r)] === "n").length + "）";
+    done + " / " + ROWS.length + " 判定済み（" + ["y", "m", "n", "x"].map(k =>
+      k + " " + ROWS.filter(r => picks[id(r)] === k).length).join(" ・ ") + "）";
   document.getElementById("bar").style.width = (ROWS.length ? 100 * done / ROWS.length : 0) + "%";
 }
 function mark() {
@@ -149,8 +156,7 @@ document.getElementById("export").onclick = () => {
 document.getElementById("filter").onchange = () => { render(); mark(); };
 document.addEventListener("keydown", e => {
   if (e.metaKey || e.ctrlKey || e.altKey || e.target.tagName === "SELECT") return;
-  if (e.key === "y") { set(cur, "y"); step(1); }
-  else if (e.key === "n") { set(cur, "n"); step(1); }
+  if ("ymnx".includes(e.key) && e.key.length === 1) { set(cur, e.key); step(1); }
   else if (e.key === "u") set(cur, null);
   else if (e.key === "j") step(1);
   else if (e.key === "k") step(-1);

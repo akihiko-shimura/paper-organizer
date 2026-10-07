@@ -630,8 +630,9 @@ def needs_human(r):
     段の判定は通ったが出どころ・年・第一著者のどれかが欠けた記録。後者は Crossref の記録に著者が無いとき
     (誌の前付け・編集記事・書籍の章)に起き、裏取りは著者が空だと著者の照合を飛ばすので、論文でない記録に着きうる。
     以前は段だけを見ていたので、この記録は改名もされず、人手行きの一覧にも件数にも出なかった(2026-10-06、3 件)。
-    manual は項目が欠けていても回さない: 人が一部だけ埋めた記録を戻すと、review が「未 merge の記入」とみて止まり続ける。"""
-    return r.get("rung") not in ("supplement", "manual") and not renamable(r)
+    manual は項目が欠けていても回さない: 人が一部だけ埋めた記録を戻すと、review が「未 merge の記入」とみて止まり続ける。
+    人が「論文ではない」とした記録(not_paper: 本の抜粋・講義ノート・資料)も回さない。同定する相手が無い。"""
+    return r.get("rung") not in ("supplement", "manual") and not r.get("not_paper") and not renamable(r)
 
 
 def enrichable(r):
@@ -851,7 +852,11 @@ def stats():
     res = sum(v for k, v in by.items() if k not in TERMINAL)
     print("  %-14s %4d  %5.1f%%  (rename 対象)" % ("RESOLVED", res, 100.0 * res / n))
     hand = sum(1 for r in recs if needs_human(r))
+    np_ = sum(1 for r in recs if r.get("not_paper"))
     print("  %-14s %4d  %5.1f%%  (review で人へ)" % ("要人手", hand, 100.0 * hand / n))
+    if np_:
+        print("  %-14s %4d  %5.1f%%  (人が「論文ではない」とした。これを除く解決率 %.1f%%)"
+              % ("論文でない", np_, 100.0 * np_ / n, 100.0 * res / max(n - np_, 1)))
     supp = by.get("supplement", 0)
     print("  %-14s %4d  %5.1f%%  (補足資料。触れない)" % ("SI", supp, 100.0 * supp / n))
     print("\n--- unresolved sample ---")
@@ -1040,6 +1045,8 @@ def why(r):
 REVIEW_TSV = os.path.join(ROOT, "unresolved.tsv")
 # 候補の列(review が埋める)と、利用者が埋める列。候補は ok に y を付けたときだけ merge が書く
 CAND_COLS = ["cand_doi", "cand_title", "cand_where", "cand_year", "ok"]
+# ok 列の値。y 正しい / m 正しいが手元の PDF は出版前の原稿 / n 候補が違う / x 論文ではない(本の抜粋・講義ノート・資料)
+OK_VALUES = ("y", "m", "n", "x")
 USER_COLS = ["ok"] + REVIEW_COLS
 
 
@@ -1135,15 +1142,22 @@ def review():
 def merge():
     """unresolved.tsv の人手入力を索引に書き戻す。doi があれば Crossref を正とする。"""
     head, rows = _read_review(REVIEW_TSV)
-    by_path, rejected, not_journal = {}, {}, []
+    by_path, rejected, not_journal, not_paper, manuscript = {}, {}, [], set(), set()
     for r in rows:
         d = {k: v.strip() for k, v in zip(head, r)}
         ok = d.get("ok", "").lower()
-        took = ok == "y" and d.get("cand_doi") and not d.get("doi")
+        if ok == "x":                                      # 論文ではない: 人手行きから外す。同定はしない
+            not_paper.add(d["path"])
+            if d.get("cand_doi"):
+                rejected[d["path"]] = d["cand_doi"]
+            continue
+        took = ok in ("y", "m") and d.get("cand_doi") and not d.get("doi")
         if took:
             d["doi"] = d["cand_doi"]                        # 候補を採る
         elif ok == "n" and d.get("cand_doi"):
             rejected[d["path"]] = d["cand_doi"]             # 次から候補に出さない
+        if ok == "m":
+            manuscript.add(d["path"])                       # 論文は合っているが、手元の PDF は出版前の原稿
         if not any(d.get(k) for k in REVIEW_COLS):
             continue                                       # n だけの行: 同定はまだ
         rec = from_crossref(d["doi"]) if d.get("doi") else None
@@ -1163,11 +1177,17 @@ def merge():
     for r in recs:
         if r["path"] in rejected:
             r["cand_rejected"] = (r.get("cand_rejected") or []) + [rejected[r["path"]]]
+        if r["path"] in not_paper:
+            r["not_paper"] = "user"
         if r["path"] in by_path:
             r.update(by_path[r["path"]])
+            if r["path"] in manuscript:
+                r["version_note"] = "manuscript"
             hit += 1
     save_index(recs, stamp)
-    print("%d 件を索引に反映、候補を違うとした %d 件" % (hit, len(rejected)))
+    print("%d 件を索引に反映(うち原稿 %d)、候補を違うとした %d 件、論文ではないとした %d 件"
+          % (hit, sum(1 for r in recs if r["path"] in manuscript and r["path"] in by_path), len(rejected) - len(
+              [p for p in rejected if p in not_paper]), len(not_paper)))
     if not_journal:
         print("y を付けたが Crossref で雑誌の論文として引けない %d 件は書いていない(学位論文・書籍など)。"
               "year/first_author/journal などの列を埋めて再度 merge:" % len(not_journal))
@@ -1741,7 +1761,7 @@ def review_page():
 
 
 def apply_ok(lines, ok):
-    """unresolved.tsv の行に、ページで付けた判定 ok {(path, cand_doi): "y"|"n"} を入れる。候補が変わった行
+    """unresolved.tsv の行に、ページで付けた判定 ok {(path, cand_doi): OK_VALUES のどれか} を入れる。候補が変わった行
     (review をやり直した)と表に無い行は入れない。(新しい行, 入れた数, 入れなかった数) を返す。"""
     head = lines[0].rstrip("\n").split("\t")
     ip, ic, io = head.index("path"), head.index("cand_doi"), head.index("ok")
@@ -1749,11 +1769,11 @@ def apply_ok(lines, ok):
     for l in lines[1:]:
         r = l.rstrip("\n").split("\t")
         v = ok.get((r[ip], r[ic])) if r[ic] else None
-        if v in ("y", "n"):
+        if v in OK_VALUES:
             r[io], n = v, n + 1
             seen.add((r[ip], r[ic]))
         out.append("\t".join(r) + "\n")
-    return out, n, sum(1 for k, v in ok.items() if v in ("y", "n") and k not in seen)
+    return out, n, sum(1 for k, v in ok.items() if v in OK_VALUES and k not in seen)
 
 
 def review_ok():
@@ -2417,6 +2437,8 @@ def selftest():
     page = review_page_html([{"cand_title": "a </script><img src=x onerror=alert(1)> & b"}], "<script>__DATA__</script>")
     assert "</script><img" not in page and page.count("</script>") == 1, "表題の </script> でページが壊れる"
     L = ["path\thint\tcand_doi\tok\n", "/a\th\t10.1/a\t\n", "/b\th\t10.1/b\t\n", "/c\th\t\t\n"]
+    for v in ("y", "m", "n", "x"):                          # どれも入る(定数を使うと、定数を削っても通ってしまう)
+        assert apply_ok(L, {("/a", "10.1/a"): v})[0][1].endswith("\t%s\n" % v), "判定 %s を入れない" % v
     out, n, stale = apply_ok(L, {("/a", "10.1/a"): "y", ("/b", "10.1/OLD"): "n", ("/c", ""): "y", ("/z", "10.1/z"): "n",
                                  ("/b", "10.1/b"): "maybe"})
     assert n == 1 and out[1].endswith("\ty\n") and out[2].endswith("\t\n") and out[3].endswith("\t\n"), \
@@ -2483,6 +2505,9 @@ def selftest():
     assert not enrichable(orphan), "人に回す記録の DOI で抄録を付ける"
     assert all(needs_human(dict(paper, rung=x)) for x in ("unresolved", "error", "unverified")), "同定できていない段が人に回らない"
     assert not needs_human(dict(orphan, rung="manual")), "人が一部だけ埋めた記録(manual)を人に戻している(review が止まり続ける)"
+    assert not needs_human(dict(unver, not_paper="user")) and not needs_human(dict(paper, rung="unresolved", not_paper="user")), \
+        "人が「論文ではない」とした記録を、また人に回している"
+    assert not renamable(dict(unver, not_paper="user")), "論文ではない記録を改名の対象にしている"
     assert enrichable(paper), "解決済みに抄録を付けない"
     assert enrichable(si), "SI に本文の抄録を付けない(検索で本文と一緒に引けなくなる)"
     assert not enrichable(unver), "裏の取れていない DOI の抄録を付けてしまう"
