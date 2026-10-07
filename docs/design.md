@@ -6,6 +6,10 @@ This document explains how `paper-organizer` identifies PDFs, why it is built th
 each safeguard does **not** catch. It is a condensed, public version of the working design record; individual papers
 from the author's collection have been left out.
 
+The [README](../README.md) is the short version for people who want to use the tool. This document is for people
+who want to change it or check its claims. All measurements are collected in section 16, and the alternatives that
+were measured and rejected in section 17.
+
 All measurements come from one collection: about 3,200 PDFs, mostly optics and condensed-matter physics, mostly
 English, published from the 1950s to 2026. Sample sizes are stated with every number. Treat them as evidence about
 this collection, not as general accuracy figures.
@@ -346,8 +350,14 @@ SQLite FTS5 with the trigram tokenizer over title, authors, journal, DOI, abstra
 with column weights (title highest). A query without operators is an OR of its words of three or more characters;
 `AND`, `OR`, `NOT`, phrases and column prefixes pass through.
 
-Embedding search was built (Apple `NLEmbedding`, 512 dimensions) and is not the default. Rank of the right paper for
-8 queries with a known answer:
+### Embedding (vector) search: built, not the default
+
+**What exists.** `papers index` stores a 512-dimension sentence vector of each record's title (Apple `NLEmbedding`,
+English model, no extra dependency; `vec.swift`). `papers search --mode=vec` ranks by cosine similarity (brute force
+in pure Python, about 0.06 s for 3,200 records). `--mode=hybrid` merges the full-text and the vector ranking by
+reciprocal-rank fusion. The default (`fts`), the skill and the librarian agent do not use vectors.
+
+**Why it is not the default.** Rank of the right paper for 8 queries with a known answer, on a 20-file test set:
 
 ```
 FTS5 trigram (OR + bm25)        1  4  2  1   1  1   4   1
@@ -355,11 +365,65 @@ Sentence embedding of titles    1  1  1  1  17  8  15  13
 Reciprocal-rank fusion of both  1  1  1  1   7  1   9   6
 ```
 
-The general-purpose embedding does not know technical vocabulary, and fusion is worse than full text on 3 of 8. Eight
-queries is a small test; a domain model was not tried.
+- The general-purpose model does not know technical vocabulary. It did not connect *neodymium* with *Nd:YAG*, or
+  *bond breaking* with *reaction dynamics*. Full-text search ranked the right paper 1st and 4th for those queries.
+- Fusion is dragged down by the weaker ranking: worse than full text alone on 3 of 8 (1→7, 4→9, 1→6).
+- Only titles are embedded. `NLEmbedding` averages over its whole input instead of truncating it (the vector of a
+  full text and that of its first 600 characters had cosine 0.99). Adding the abstract moved every paper towards "a
+  physics abstract": ranks fell on all 8 queries, and records without an abstract rose to the top.
 
-Not handled: an ASCII spelling does not find an accented name (`remove_diacritics` would fix this); only the first
+**How weak this evidence is.**
+
+- 20 files and 8 queries. It has not been repeated on the full collection (3,175 files), where full-text search
+  returns more noise as well, so the outcome may differ.
+- One model. A model trained on scientific text (SPECTER2, for example) was not tried. What lost is this model, not
+  vector search as such.
+- One query on the full collection, as an illustration and not a measurement (n = 1): for a topical phrase of three
+  words, the number of top-10 results with all three words in the title was 7 for full text, 3 for vectors and 6 for
+  the hybrid. Most of the other vector results shared only the most generic of the three words. The criterion is
+  word overlap, which favours full-text search.
+
+**Questions vectors should answer and full-text search cannot.**
+
+- Paraphrase: the query's words occur in neither the title nor the abstract.
+- Across languages: a Japanese query for an English paper. The model used here is English-only, so it cannot do
+  this either.
+
+**What to measure before changing the default (not done).** About 20 paraphrase queries with a known answer on the
+full collection, comparing full text, `NLEmbedding` and a scientific-text model. Such a model needs a package
+dependency and a model download, which does not fit "standard library only"; if adopted it would stay optional.
+
+### What is not handled
+
+An ASCII spelling does not find an accented name (`remove_diacritics` would fix this); only the first
 3,000 characters of each PDF are indexed (Spotlight covers the rest on macOS).
+
+### Compared with Spotlight
+
+**What Spotlight alone does and does not do.** Measured with `mdfind` restricted to the library, using
+`kMDItemTextContent == "*…*"cd` (a substring match on the indexed text):
+
+| Test | Result |
+|---|---|
+| Look up the DOI of 60 random resolved papers | Own file returned for 37 (alone for 35, with one other file for 2). Nothing for 23: all 18 that were resolved by `bib_query`, 4 of 11 by embedded DOI, 1 of 31 by printed DOI |
+| Search 15 first-author surnames (each the first author of 3 to 15 held papers) | 3,294 files returned; 150 have the name among their authors (5%); 68 of the 70 first-author papers were among them |
+| Find 37 scanned PDFs (no text layer) by the two longest words in this tool's OCR text | 1 found. Control, 40 PDFs with a text layer and the same method: 34 found |
+| Keyword search with 8 topical phrases of two or three words (plain `mdfind`, which requires all words) | 5,353 files returned in total; 355 have the words in the title (7%) and 360 in the abstract (7%). 355 of the 362 title papers are included. With the phrase in quotes: 1,009 files, 158 of the 362 |
+| The same 8 phrases with `papers search` | Top 10 (default OR query, bm25 with column weights): 65 of 80 have the words in the title, 13 in the abstract. Top 20: 117 and 30 of 160. With `AND`: 1,888 files, including 361 of the 362 title papers |
+
+For keywords, both tools find the papers whose title carries the words. The difference is what surrounds them:
+Spotlight returns every file that mentions the words anywhere in its full text, unranked through `mdfind`, so
+on-topic papers are a small share of a long list. `papers search` sees less text (3,000 characters), which removes
+most passing mentions, and ranks title matches first. The relevance value Spotlight computes
+(`kMDQueryResultContentRelevance`) came back empty through `NSMetadataQuery` for three query forms, so its
+on-screen ordering is unmeasured.
+
+So recall for text that exists is good, and Spotlight is the right tool for phrases deep inside a paper. It cannot
+answer by identifier when the identifier is not printed, it cannot separate an author from a cited name, and on
+this machine it did not index scanned pages. Caveats: the surname test is a substring match, so a short name inside
+a longer word also counts; the scan test uses words from this tool's own OCR, some of which may be misread; in the
+keyword test "on topic" means the words occur in the title or abstract held in the index, which is a mechanical
+proxy (for unidentified files the title read by the optional page check is used; files with neither count as off topic for both tools).
 
 ## 14. How the code is checked
 
@@ -417,6 +481,8 @@ Collected from the notes above, plus items recorded only in the working notes.
 **Search**
 
 - Accented names are not found by their ASCII spelling
+- Paraphrases and queries in another language than the paper are not answered. Embedding search was tested on 20
+  files and 8 queries only, with one general-purpose model (section 13)
 - Unresolved files do not appear in the views
 - That `search` hides moved-aside duplicates is not covered by an automated check
 
@@ -424,3 +490,71 @@ Collected from the notes above, plus items recorded only in the working notes.
 
 - Data lives in the repository folder and paths are absolute; one index cannot be used from two machines
 - macOS-only components: Vision OCR, `NLEmbedding`, keychain, Spotlight
+
+## 16. Measurements in one place
+
+The README gives four of these numbers. This is the full set, with sample sizes.
+
+**Outcome of identification** (n = 3,175 files, October 2026):
+
+| Outcome | Files | Share |
+|---|---|---|
+| Resolved (the files that get renamed) | 2,291 | 72.2% |
+| — DOI printed in the text | 1,283 | 40.4% |
+| — query from the first 300 characters | 548 | 17.3% |
+| — DOI in embedded metadata | 353 | 11.1% |
+| — arXiv | 87 | 2.7% |
+| — title search | 13 | 0.4% |
+| — entered by hand | 7 | 0.2% |
+| Unverified (a candidate exists but failed the header check) | 177 | 5.6% |
+| Unresolved | 664 | 20.9% |
+| Supplementary material (left alone) | 43 | 1.4% |
+
+843 files need a person: the unverified and unresolved ones, plus 2 edge cases. For 617 of them a title is readable
+but the automatic queries found no acceptable record. That group is a mixture: work Crossref does not hold (theses,
+books, conference abstracts, reports, datasheets, lecture notes), and ordinary papers the query missed (146 of the
+617; section 12). Some of the files are not papers at all, so the 72% understates how well real papers are
+identified; by how much has not been measured.
+
+**Precision of the resolved records.** Errors hide among the resolved records, so samples were drawn there.
+
+| Check | Sample | Result |
+|---|---|---|
+| Stratified random sample across rungs, each compared with page 1 by eye | 38 judgeable | 0 wrong. With n = 38 this only bounds the error rate below roughly 10% |
+| Before the header check existed | 214 | 5 or 6 wrong (2.3–2.8%) |
+| Renamed files compared with page 1 | 20 random | 20 names match the content |
+| Page check with Claude Haiku over all resolved records | about 2,350 | 8 flagged: 2 real misidentifications, 6 false alarms |
+| Page check on newly added files | 50 | 0 flagged |
+
+Audits found error types the random sample missed; the largest is the page that begins with the tail of the previous
+article (section 5; 7 known, 6 stopped by the current rules). Not established: the precision of the records the page
+check did not flag, and anything about collections in other fields or languages.
+
+**Other measurements**
+
+| What | Result |
+|---|---|
+| OCR (Apple Vision) on scanned pages, against the text layer of the same pages | 91.7% word recall for English at 1.3 s per page; 98% character recall for Japanese (one document) |
+| Abstract coverage after `enrich` | 2,048 of 3,175 files (65%) |
+| Search: rank of the right paper for 8 test queries on a 20-file test set | Full text `1, 4, 2, 1, 1, 1, 4, 1`; title embeddings `1, 1, 1, 1, 17, 8, 15, 13` (section 13) |
+| Published version of an arXiv preprint, by title and first author in Crossref | Of 63 preprints whose published DOI is known: 59 matched to it, 1 to a different DOI (section 6) |
+| Cost of the page check (Claude Haiku, Batch API) | 3.31 USD for 3,203 files; 0.05 USD for 50 files |
+
+## 17. Alternatives measured and rejected
+
+Each choice was made after measuring the alternative on the same collection.
+
+| Alternative | What was measured | Decision |
+|---|---|---|
+| Let a model (LLM or layout parser) produce the title, authors and journal | A registry lookup returns the publisher's own record, including the spelling of names. Misspelt authors in existing filenames were corrected by the lookup | Take only keys from the PDF. Never generate a value |
+| Use an LLM to propose a title when no DOI is found | The first 300 characters sent to Crossref's bibliographic query, accepting only titles that literally occur in the text, reproduced 17 of the 20 files the LLM step had resolved, with 0 wrong | LLM step removed |
+| Accept Crossref's top hit above a relevance score | Scores overlap: a correct hit 59, unrelated text 23, wrong papers 37 to 42 | Never use the score. Compare strings |
+| Accept on title similarity alone | A conference abstract, the journal paper and a later book chapter can share one title exactly (similarity 1.00) | Require the header check |
+| Make the header check stricter (require volume or page) | Would reject 342 of 2,308 resolved files (14.8%); 14 sampled were nearly all correct | Not adopted |
+| Trust the PDF's embedded metadata for values | Typed by hand: a year with a letter O for the zero, author names in inconsistent formats | Use it only to find a DOI |
+| On-device LLM OCR | 45.6% recall at 70 s per page; 2 of 4 files returned nothing, silently | Call Apple Vision directly |
+| Text rules to detect "page 1 starts with another article" | Three successive rule sets each missed new cases | Look at the page instead (next row) |
+| Let a vision model decide the identity | Claude Haiku read the correct main title on 7 of 7 known bad pages and 30 of 30 good ones (Apple Vision layout heuristics: 6 of 7 and 20 of 30). But one title can belong to several editions | Veto only (section 7) |
+| Embedding (vector) search by default | On 8 queries over 20 files: better on 2, much worse on 4; the hybrid was worse than full text on 3 (section 13) | Full text is the default; embeddings stay optional. Not re-measured on the full collection |
+| Sort files into topic folders automatically | Topics were available for only 56% of files, and the existing folders carry the owner's own grouping | Leave files in place; offer symlink views |
+| Delete duplicates | — | Never. Duplicates are moved aside; deleting is the owner's decision |

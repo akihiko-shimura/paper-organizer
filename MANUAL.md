@@ -359,3 +359,17 @@ never delete PDFs (only move them. Deleting is done by the user).
 | `索引が読み込み後に変更されていた` (the index was changed after it was loaded) | Two commands were run at the same time. Try again after one of them has finished (the result of the command that could not write is left in `papers.jsonl.conflict-*`) |
 | Image-only PDFs cannot be read | OCR uses Vision on macOS (built with `swiftc` on first use. The Xcode command line tools are required). If it is not available, the tool falls back to `tesseract` |
 | Queries to Crossref are slow or hang | Put `mailto` (a contact email address) in `config.json`. Crossref puts users who give a contact into a stable pool |
+
+## 8. Glossary of Japanese output
+
+Command output, generated folder names and code comments are in Japanese.
+
+| Japanese | Meaning |
+|---|---|
+| 有り / 無し | held / not in the index |
+| 候補(未検証) | candidate only, unverified |
+| 人手行き | needs a person |
+| 取得失敗 | lookup failed, will be retried |
+| 重複 / `_重複文献/` | duplicate / the duplicates holding folder |
+| `_プレプリント(出版版あり)/` | holding folder for preprints whose published version you hold |
+| 誌名・年・分野・第一著者 | journal, year, topic, first author (the view folders) |
