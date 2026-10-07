@@ -333,6 +333,13 @@ Measured on the review candidates (title and first author read from the page, se
 files used as ground truth, 287 candidates, 275 correct; 9 of the 12 wrong were other editions of the same work. On
 22 sampled files that needed a person, 18 candidates were correct. Hence the y/n step.
 
+A candidate was found for 146 of the 617 files whose title is readable but which no automatic rung resolved. So
+these are in Crossref, and the rungs missed them. Replaying the cached responses shows why: for 108 the first 300
+characters of text are not the article's own beginning (the page opens with the tail of another item, a figure
+caption, or journal furniture), so `bib_query` asked the wrong question; for 31 the right record was among the top
+five but its title is not literally in the extracted text (OCR damage, line breaks); 7 other. Whether such
+candidates can be accepted without a person, given further evidence on the page, has not been measured.
+
 ## 13. Search
 
 SQLite FTS5 with the trigram tokenizer over title, authors, journal, DOI, abstract, folder and text, ranked by bm25

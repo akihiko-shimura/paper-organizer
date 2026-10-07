@@ -1032,7 +1032,9 @@ def why(r):
         return "A_本文なし" if not r.get("ocr") else "A_OCRしても読めず"
     if len((r.get("title_guess") or "")) < 15:
         return "C_タイトル候補が取れず"
-    return "B_タイトルは読めたがCrossrefに無い"   # 学位論文・書籍・予稿がここに集まる
+    # 以前の名前は「Crossrefに無い」だったが、Crossref にある論文も多い(候補が出た 146/617)。自動の問い合わせが
+    # 外れただけ: 本文の先頭 300 字が論文の書き出しでない 108、表題が本文に字面で無い 31、その他 7(2026-10-07)
+    return "B_タイトルは読めたが自動の検索で見つからない"   # 学位論文・書籍・予稿と、問い合わせが外れた論文
 
 
 REVIEW_TSV = os.path.join(ROOT, "unresolved.tsv")

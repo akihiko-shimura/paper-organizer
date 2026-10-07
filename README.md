@@ -142,9 +142,12 @@ and new files added, so totals differ slightly from one table to the next.
 | Unresolved | 664 | 20.9% |
 | Supplementary material (left alone) | 43 | 1.4% |
 
-843 files need a person: the unverified and unresolved ones, plus 2 edge cases. For 617 of
-them the title is readable but Crossref does not hold the work: theses, books, conference abstracts, reports,
-datasheets.
+843 files need a person: the unverified and unresolved ones, plus 2 edge cases. For 617 of them a title is readable
+but the automatic queries found no acceptable record. That group is a mixture. Part of it is work Crossref does not
+hold (theses, books, conference abstracts, reports, datasheets, lecture notes). Part of it is ordinary papers the
+query missed: for 146 of the 617, a Crossref record turns up once the title is read from an image of the page,
+mostly because the page's first lines are not the article's own beginning. Some of the files are not papers at
+all, so the 72% understates how well real papers are identified; by how much has not been measured.
 
 **Are the resolved ones right?** Errors hide among the resolved records, so that is where samples were drawn.
 
