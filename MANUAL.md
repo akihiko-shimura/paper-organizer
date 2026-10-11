@@ -224,6 +224,8 @@ renames → search index. If you give a folder (`papers add <folder>`), it looks
   being attached to a record that is not a paper, such as a journal cover or front matter (for example, the title of the record is the journal name)
 - Records shown as 「取得失敗」 (lookup failed) are ones for which no response was obtained from Crossref or arXiv (a delay or outage on their side). They are not identified yet.
   Wait a while and run `papers add` again; it fetches only those records again
+- The report ends with a section on non-papers (「論文以外」): the number of unidentified candidates of more than 50 pages, and the planned moves of records already given a kind.
+  If there are candidates, give them a kind with `papers nonpaper-page` (section 5, "Setting non-papers aside")
 - If the plan is right, move the **duplicates first**:
 
   ```bash
@@ -331,6 +333,37 @@ papers index && papers views
 - If a file with the same name exists at the destination, the command stops. With `--apply` it backs up the index and then moves. `papers undo` reverts it
 - You may also move files in Finder. In that case, correct the index with `relocate` below
 
+### Setting non-papers aside: `nonpaper` (books, theses, lecture notes, documents, patents)
+
+A file that is in neither Crossref nor arXiv cannot be identified and stays in the list for a person forever. The tool lists long unidentified files
+as candidates, and moves only the ones a person has given a kind to into `_論文以外/<kind folder>/` under the library. A person decides what is not a paper; the tool only proposes.
+
+```bash
+papers nonpaper-page && open "<repo>/nonpaper.html"   # a page for giving each candidate a kind
+papers nonpaper-ok ~/Downloads/nonpaper-ok.tsv        # write the page's export to the index (no file is moved)
+papers nonpaper                                       # only show the planned moves
+papers nonpaper --apply && papers index               # move
+```
+
+- **Candidates**: records left for a person whose PDF has more than 50 pages and that have no kind yet. `papers add` records the page count of new PDFs;
+  for older records `nonpaper-page` looks it up the first time (about 0.01 s per file)
+- **Keys on the page**: `b` book or handbook, `t` thesis, `l` lecture notes or slides, `d` report, manual or other document, `a` patent,
+  `p` keep as a paper. `u` undo, `j`/`k` next/previous, `o` open the PDF
+- `p` (keep as a paper) leaves the record in the list for a person and only stops it from being proposed again. Identify it with `papers fix <name> --doi <DOI>` and the like
+- `nonpaper-ok` writes nothing if any path is not in the index, any key is unknown, or any line cannot be read (not two tab-separated fields, or the same path twice).
+  It does not write to identified records
+- `nonpaper --apply` backs up the index, moves the files and corrects the index. If the destination already has a file of the same name, `_2` is appended (nothing is deleted, even identical copies;
+  names that differ only in letter case count as the same name). If a move fails partway, the files already moved are written to the index and the command stops. `papers undo` reverts it
+- To change a kind, give `nonpaper-ok` a file written by hand, one line per file: path, tab, key (the page does not list records that already have a kind).
+  `papers nonpaper` then plans a move between the kind folders.
+  A record changed back to a paper is not moved back automatically (use `papers move`)
+- A record marked as a non-paper is no longer listed for a person and is not renamed or treated as a duplicate. It still appears in `papers search`
+- **Not proposed**: non-papers of 50 pages or fewer (short slides, manuals, patents) and PDFs whose page count cannot be read. Mark these by writing the file for `nonpaper-ok`
+  by hand (one line per file: path, tab, key). Book chapters that were identified are not proposed, and there is no way to mark them yet
+- Why 50 pages: a person looked at all 109 unidentified files of more than 50 pages. Of the 63 over 100 pages, 62 were not papers; of the 46 with 51–100 pages, 37 were not
+  (the rest were review articles, identified afterwards)
+- The folder names are Japanese: `_論文以外` (non-papers), `本・ハンドブック` (books), `学位論文` (theses), `講義ノート・スライド` (lectures), `報告書・マニュアル・資料` (documents), `特許` (patents)
+
 ### Files moved, renamed or deleted by hand: `relocate`
 
 When you move a file with Finder or the like, the index keeps the old path (`papers index` alone does not fix this, because the master copy of the index
@@ -353,7 +386,7 @@ papers index
 
 ### Undoing
 
-- Renames and `move`: `papers undo` (reverts the most recent one)
+- Renames, `move` and `nonpaper --apply`: `papers undo` (reverts the most recent one)
 - Moves of duplicates: `<repo>/dedup-<time>.jsonl` records the source and the destination of each move (there is no automatic undo. Move the files back by hand and run `relocate`)
 - Index: `<repo>/backups/` holds the `papers.jsonl` from before each rewrite (`papers-<time>-before-<what>.jsonl`).
   To restore, copy the backup over `<repo>/papers.jsonl` and run `papers index`

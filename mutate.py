@@ -38,7 +38,7 @@ def main(argv):
         return 2
     d = tempfile.mkdtemp(prefix="mutate-")
     for f in os.listdir(ROOT):
-        if f.endswith((".py", ".swift")) or f in ("vocr", "vec"):
+        if f.endswith((".py", ".swift", "_page.html")) or f in ("vocr", "vec"):   # ページの型は検査が読む(index_check の R)
             shutil.copy2(os.path.join(ROOT, f), d)
     if os.path.exists(os.path.join(ROOT, "papers.jsonl")):
         shutil.copy2(os.path.join(ROOT, "papers.jsonl"), d)       # 本物の索引は書き換えさせない

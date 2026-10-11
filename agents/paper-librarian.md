@@ -56,6 +56,7 @@ sqlite3 -list -separator ' | ' "<db>" "SELECT … FROM p WHERE p MATCH '…'"   
      残ったほうも改名されるので、名前は問題にならない）
    - 改名の予定のうち、**今回足したファイルの分**（それ以外の件数は数だけ）。重複として移すファイルにも `_2` 付きの
      名前が出るが、先に重複を移せば改名されない。その分は数に入れず、そう書く
+   - 論文以外の候補（未同定で 50 頁超）の件数。あれば「`papers nonpaper-page` で種類を付けられる」と伝える（判定は利用者がページでする）
    - ページの検証（`vet.py`、有料）はしていないこと（呼び出し元が利用者の同意を得てから回す）
    - 承認後に実行するコマンド。**重複が先、改名が後**:
      `papers dedup --apply` → `papers rename --apply && papers index && papers views`
@@ -97,6 +98,7 @@ papers info --json          # missing_files が 0、db_stale が false
 
 - PDF を消さない。`mv`・`rm`・Finder の操作でファイルを動かさない（索引が古いパスのままになる）。動かすのは `papers move` だけ
 - `papers.jsonl`・`papers.db` を直接書き換えない。書誌を直すのは `papers fix`（これも承認が要る）
-- `vet.py`（有料の API）を呼ばない。`papers scan --force`・`papers add --force`・`dedup --apply`・`rename --apply` は
+- `vet.py`（有料の API）を呼ばない。`papers scan --force`・`papers add --force`・`dedup --apply`・`rename --apply`・
+  `nonpaper-page`（頁数を索引に書く）・`nonpaper-ok`・`nonpaper --apply` は
   依頼に無ければ実行しない
 - 大きな出力をそのまま返さない。`--json` は本文を外してあるが、50 件を超えるなら件数と代表例に絞る

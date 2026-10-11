@@ -775,6 +775,9 @@ def scan(root=None):
                 rec = {"path": p, "folder": os.path.dirname(p), "filename": os.path.basename(p),
                        "rung": "error", "error": str(e)[:200]}
             rec["scanned_at"] = time.strftime("%Y-%m-%d")      # papers recent が使う
+            n = pdf_pages(p)                                    # 論文以外の候補(papers nonpaper)が使う
+            if n is not None:                                   # 読めなかったら書かない(nonpaper-page が調べ直す)
+                rec["n_pages"] = n
             out.write(json.dumps(rec, ensure_ascii=False) + "\n")
             out.flush()                                 # resumable: a Drive stall costs nothing
             if i % 25 == 0:
@@ -831,12 +834,15 @@ def add():
     dedup()
     print("\n=== 改名(dry run。まだ改名していない記録の全部)")
     rename()
+    print("\n=== 論文以外(dry run。本・学位論文・講義ノートなど)")
+    nonpaper()
     if not _db_format_ok() or os.path.getmtime(DB) < os.path.getmtime(INDEX):
         print("\n=== 検索の索引")
         build_db()
     print("\n動かすのは利用者の承認のあと:\n"
           "  papers dedup --apply                                   # 重複の予定があるとき\n"
           "  papers rename --apply && papers index && papers views   # 改名の予定があるとき\n"
+          "  papers nonpaper-page → papers nonpaper-ok <書き出したファイル> → papers nonpaper --apply   # 論文以外の候補があるとき\n"
           "ページの検証(任意・有料)は、まだ検証していない記録だけが対象。見積もりと手順は MANUAL.md の §4")
 
 
@@ -1009,6 +1015,7 @@ def undo():
         if r["path"] in back:
             r["path"] = back[r["path"]]
             r["filename"] = os.path.basename(r["path"])
+            r["folder"] = os.path.dirname(r["path"])      # move・nonpaper はフォルダも変える。戻さないと記録の中で食い違う
     repoint(recs, back)
     save_index(recs, stamp)
     print("reverted %d 件 (%s)" % (n, os.path.basename(trails[-1])))
@@ -1688,6 +1695,215 @@ def move():
     repoint(recs, moved)
     save_index(recs, stamp)
     print("%d 件を動かした。戻すには papers undo。検索とビューに反映: papers index && papers views" % len(moved))
+
+
+# ---------- 論文以外(本・学位論文・講義ノート・資料・特許)を避ける ----------
+# 同定の相手(Crossref・arXiv)が無いファイルは、いつまでも人手行きに残る。未同定で頁数の多いものを候補として人に見せ、
+# 人が種類を付けたものだけを置き場の下の _論文以外/<種類>/ へ移す。機械は候補を出すだけで、論文かどうかは決めない。
+# 候補の線(50 頁)の根拠: 未同定で 50 頁を超える 109 件に利用者が種類を付けた結果、100 頁超は 62/63、51〜100 頁は 37/46 が
+# 論文以外だった(残りは総説)。50 頁以下は見ていない。
+NONPAPER_DIR = "_論文以外"
+NONPAPER_PAGES = 50
+# 種類 → (確認用ページのキー, 移す先のフォルダ)。paper は「論文として残す」: 移さず、候補に出さなくなるだけ
+KINDS = {"book": ("b", "本・ハンドブック"), "thesis": ("t", "学位論文"), "lecture": ("l", "講義ノート・スライド"),
+         "document": ("d", "報告書・マニュアル・資料"), "patent": ("a", "特許"), "paper": ("p", None)}
+
+
+def _pages_in(info):
+    """pdfinfo の出力から頁数。無ければ None。"""
+    m = re.search(r'^Pages:\s+(\d+)', info or "", re.M)
+    return int(m.group(1)) if m else None
+
+
+def pdf_pages(path):
+    """PDF の頁数。読めなければ None。"""
+    return _pages_in(sh(["pdfinfo", path]))
+
+
+def nonpaper_candidates(recs):
+    """論文以外の候補: 人手行きで、まだ人が種類を決めておらず、頁数が線を超える記録。頁数を調べていない記録は入らない。
+    外部から取れなかっただけの記録(次の add が取り直す)も入れない。"""
+    return [r for r in recs if needs_human(r) and not retryable(r) and not r.get("kind")
+            and (r.get("n_pages") or 0) > NONPAPER_PAGES]
+
+
+def nonpaper_marks(recs, marks):
+    """確認用ページの判定 {パス: キー} を記録に書く。(論文以外にした数, 論文として残す数, 同定済みで飛ばした数, 索引に無いパス, 知らないキー)。
+    論文以外は not_paper と kind を、論文として残すものは kind=paper だけを書く(人手行きに残り、候補には出なくなる)。
+    同定済みの記録には書かない(同定を人が外すなら papers fix)。"""
+    key = {v[0]: k for k, v in KINDS.items()}
+    nfc = lambda s: unicodedata.normalize("NFC", s)
+    by = {nfc(r["path"]): r for r in recs}
+    n = keep = skipped = 0
+    unknown, bad = [], []
+    for p, k in marks.items():
+        r = by.get(nfc(p))
+        if r is None:
+            unknown.append(p)
+        elif k not in key:
+            bad.append(k)
+        elif renamable(r):
+            skipped += 1
+        elif key[k] == "paper":
+            r["kind"] = "paper"
+            r.pop("not_paper", None)
+            keep += 1
+        else:
+            r["kind"], r["not_paper"] = key[k], "user"
+            n += 1
+    return n, keep, skipped, unknown, bad
+
+
+def nonpaper_read(text):
+    """nonpaper-ok に渡すファイルの中身を ({パス: キー}, 読めない行) にする。見出しの行(path …)と空行は読み飛ばす。
+    タブで 2 欄に割れない行・同じパスの 2 行目は読めない行にする(黙って飛ばすと、付けたつもりの印が付かない)。"""
+    marks, broken = {}, []
+    for l in text.splitlines():
+        f = [x.strip() for x in l.split("\t")]
+        if not l.strip() or f[0] == "path":
+            continue
+        if len(f) < 2 or not f[0] or not f[1] or f[0] in marks:
+            broken.append(l)
+        else:
+            marks[f[0]] = f[1]
+    return marks, broken
+
+
+def nonpaper_plan(recs, root, exists=os.path.exists):
+    """種類の付いた論文以外の記録のうち、種類のフォルダにまだ無いものの移動の予定 [(記録, 移動先)] と、ファイルが無くて
+    飛ばした記録。同じ名前があれば _2, _3 を付ける(中身が同じでも消さない)。"""
+    same = lambda p: unicodedata.normalize("NFC", p).casefold()      # 大小文字・合成/分解だけが違う名前は、同じファイルになる
+    plan, gone, taken = [], [], set()
+    for r in recs:
+        folder = KINDS.get(r.get("kind"), (None, None))[1]
+        if not r.get("not_paper") or not folder or moved_aside(r):
+            continue
+        dest = os.path.join(root, NONPAPER_DIR, folder)
+        if r["folder"] == dest:
+            continue
+        if not exists(r["path"]):
+            gone.append(r)
+            continue
+        stem, ext = os.path.splitext(r["filename"])
+        new, i = os.path.join(dest, r["filename"]), 2
+        while same(new) in taken or exists(new):
+            new, i = os.path.join(dest, "%s_%d%s" % (stem, i, ext)), i + 1
+        taken.add(same(new))
+        plan.append((r, new))
+    return plan, gone
+
+
+def nonpaper_strays(plan):
+    """予定のうち、すでにどこかの _論文以外/<同じ種類>/ にあるファイルを別の場所の同じフォルダへ動かすもの。
+    置き場の根(全記録の共通の親)が変わったときに起きる(置き場の外のフォルダを add した等)。移し済みの全件が動くので止める。"""
+    return [(r, new) for r, new in plan if os.path.basename(os.path.dirname(r["folder"])) == NONPAPER_DIR
+            and os.path.basename(r["folder"]) == os.path.basename(os.path.dirname(new))]
+
+
+def nonpaper_page():
+    """papers nonpaper-page。論文以外の候補(未同定で 50 頁超)に種類を付けるページ nonpaper.html を作る(手元で開く)。
+    頁数をまだ調べていない人手行きの記録は、ここで調べて索引に書く(退避してから)。"""
+    recs, stamp = load_index()
+    todo = [r for r in recs if needs_human(r) and not r.get("kind") and r.get("n_pages") is None and os.path.exists(r["path"])]
+    got = 0
+    for i, r in enumerate(todo):
+        n = pdf_pages(r["path"])
+        if n is not None:                      # 読めなかった記録には書かない(次も調べ直す)
+            r["n_pages"], got = n, got + 1
+        if i % 100 == 0:
+            print("  頁数 %d/%d" % (i, len(todo)), file=sys.stderr)
+    if got:
+        bk = os.path.join(os.path.dirname(INDEX), "backups")
+        os.makedirs(bk, exist_ok=True)
+        shutil.copy2(INDEX, os.path.join(bk, "papers-%s-before-nonpaper-page.jsonl" % time.strftime("%Y%m%d-%H%M%S")))
+        save_index(recs, stamp)
+    root = os.path.commonpath([r["folder"] for r in recs])
+    rows = [{"path": r["path"], "file": r["filename"], "folder": os.path.relpath(r["folder"], root), "pages": r["n_pages"],
+             "rung": r.get("rung") or "", "ocr": bool(r.get("ocr")), "guess": " ".join((r.get("title_guess") or r.get("title") or "").split())[:120],
+             "head": " ".join((r.get("text") or "").split())[:200], "stamp": "1"}
+            for r in sorted(nonpaper_candidates(recs), key=lambda r: -r["n_pages"])]
+    kinds = json.dumps([[v[0], v[1] or "論文として残す"] for v in KINDS.values()], ensure_ascii=False)
+    # 型の印は、記録を埋める前に置き換える(表題の推定や本文の冒頭に同じ文字列があっても壊れない)
+    tpl = open(os.path.join(ROOT, "nonpaper_page.html")).read().replace("__KINDS__", kinds).replace("__PAGES__", str(NONPAPER_PAGES))
+    page = os.path.join(ROOT, "nonpaper.html")
+    _atomic_write(page, [review_page_html(rows, tpl)])
+    print("%d 件の候補を %s に。開く: open %s" % (len(rows), page, page))
+
+
+def nonpaper_ok():
+    """papers nonpaper-ok <nonpaper-ok.tsv>。ページの「書き出す」の結果(パスと種類のキー)を索引に書く(退避してから)。
+    索引に無いパス・知らないキーが 1 つでもあれば書かない。ファイルは動かさない(動かすのは papers nonpaper --apply)。"""
+    args = [a for a in sys.argv[2:] if not a.startswith("--")]
+    if len(args) != 1:
+        sys.exit(nonpaper_ok.__doc__)
+    src = os.path.expanduser(args[0])
+    if not os.path.exists(src):
+        sys.exit("ファイルが無い: %s(ページの「書き出す」で保存したファイルを渡す。候補が 0 件なら書き出すものは無い)" % src)
+    marks, broken = nonpaper_read(open(src, encoding="utf-8-sig").read())
+    if broken:
+        sys.exit("書かなかった。読めない行が %d 行(1 行は パス・タブ・キー。同じパスは 1 行だけ)。例: %r" % (len(broken), broken[0][:80]))
+    if not marks:
+        sys.exit("書くものが無い(%s に判定の行が無い)" % src)
+    recs, stamp = load_index()
+    n, keep, skipped, unknown, bad = nonpaper_marks(recs, marks)
+    if unknown or bad:
+        sys.exit("書かなかった。索引に無いパス %d 件%s、知らない種類 %s(使えるのは %s)"
+                 % (len(unknown), "(例: %s)" % unknown[0] if unknown else "", sorted(set(bad)), " ".join(v[0] for v in KINDS.values())))
+    bk = os.path.join(os.path.dirname(INDEX), "backups")
+    os.makedirs(bk, exist_ok=True)
+    shutil.copy2(INDEX, os.path.join(bk, "papers-%s-before-nonpaper-ok.jsonl" % time.strftime("%Y%m%d-%H%M%S")))
+    save_index(recs, stamp)
+    print("論文以外 %d 件・論文として残す %d 件を書いた%s。移動の予定: papers nonpaper"
+          % (n, keep, "(同定済みの %d 件には書かなかった)" % skipped if skipped else ""))
+
+
+def nonpaper():
+    """papers nonpaper [--apply]。種類の付いた論文以外を、置き場の下の _論文以外/<種類>/ へ移す。既定は予定を出すだけ。
+    --apply で索引を退避してから動かし、索引も直す。papers undo で戻せる。消さない(同じ名前には _2 を付ける)。"""
+    apply = "--apply" in sys.argv
+    recs, stamp = load_index()
+    root = os.path.commonpath([r["folder"] for r in recs])
+    unseen = sum(1 for r in recs if needs_human(r) and not r.get("kind") and r.get("n_pages") is None)
+    print("論文以外の候補(未同定で %d 頁超・種類が未定) %d 件%s。種類を付けるページ: papers nonpaper-page"
+          % (NONPAPER_PAGES, len(nonpaper_candidates(recs)),
+             "、頁数の分からない人手行き %d 件(まだ調べていない・読めない PDF・ファイルが無い)" % unseen if unseen else ""))
+    plan, gone = nonpaper_plan(recs, root)
+    if nonpaper_strays(plan):
+        r, new = nonpaper_strays(plan)[0]
+        sys.exit("止めた: すでに %s の下にあるファイルを、別の場所の同じフォルダへ動かす予定になった(%d 件。例: %s → %s)。\n"
+                 "論文の置き場(%s)の外の記録が索引に入っていないかを確かめる" % (NONPAPER_DIR, len(nonpaper_strays(plan)), r["path"], new, root))
+    for r, new in plan[:40]:
+        print("  %s\n→ %s" % (os.path.relpath(r["path"], root), os.path.relpath(new, root)))
+    for r in gone[:10]:
+        print("  ファイルが無いので飛ばす: %s" % os.path.relpath(r["path"], root))
+    if not plan:
+        print("移すものは無い(種類の付いた論文以外は %d 件)" % sum(1 for r in recs if r.get("not_paper") and r.get("kind")))
+        return
+    if not apply:
+        print("%d 件を %s の下へ。DRY RUN. 動かすには --apply" % (len(plan), os.path.join(root, NONPAPER_DIR)))
+        return
+    bk = os.path.join(os.path.dirname(INDEX), "backups")
+    os.makedirs(bk, exist_ok=True)
+    shutil.copy2(INDEX, os.path.join(bk, "papers-%s-before-nonpaper.jsonl" % time.strftime("%Y%m%d-%H%M%S")))
+    trail = os.path.join(ROOT, "renames-%s.jsonl" % time.strftime("%Y%m%d-%H%M%S"))
+    _atomic_write(trail, [json.dumps({"from": r["path"], "to": new}, ensure_ascii=False) + "\n" for r, new in plan])   # 動かす前に
+    moved = {}
+    try:
+        for r, new in plan:
+            os.makedirs(os.path.dirname(new), exist_ok=True)
+            if os.path.exists(new):            # 予定のあとに現れた・予定が見分けられなかった同名。os.rename は黙って上書きする
+                raise FileExistsError("移動先にもうファイルがある: %s" % new)
+            os.rename(r["path"], new)
+            moved[r["path"]] = new
+            r.update(path=new, folder=os.path.dirname(new), filename=os.path.basename(new))
+    finally:                                   # 途中で止まっても、動かした分は索引に書く(書かないと、索引が無いパスを指す)
+        if moved:
+            repoint(recs, moved)
+            save_index(recs, stamp)
+        if len(moved) < len(plan):
+            print("途中で止まった: %d 件中 %d 件を動かし、索引に書いた。残りは動かしていない。戻すには papers undo"
+                  % (len(plan), len(moved)), file=sys.stderr)
+    print("%d 件を動かした。戻すには papers undo。検索に反映: papers index" % len(moved))
 
 
 def fix():
@@ -2718,12 +2934,62 @@ def selftest():
     finally:
         globals()["MAILTO"] = saved_m
 
+    # --- 論文以外: 候補・判定の取り込み・移動の予定(どれも純粋な関数。ファイルを動かす側は index_check の R) ---
+    un = {"path": "/L/a/x.pdf", "folder": "/L/a", "filename": "x.pdf", "rung": "unresolved", "n_pages": NONPAPER_PAGES + 70}
+    assert nonpaper_candidates([un]) == [un], "未同定で頁数の多い記録を候補にしない"
+    for r, reason in ((dict(un, n_pages=NONPAPER_PAGES), "線ちょうどの頁数"), (dict(un, n_pages=None), "頁数が読めない"),
+                   ({k: v for k, v in un.items() if k != "n_pages"}, "頁数を調べていない"), (dict(un, kind="paper"), "人が論文として残した"),
+                   (dict(un, not_paper="user", kind="book"), "人が論文以外とした"), (dict(paper, n_pages=300), "同定済み"),
+                   (dict(un, rung="supplement"), "補足資料"), (dict(un, rung="error", fetch_failed=["x"]), "取得失敗(次の add が取り直す)")):
+        assert not nonpaper_candidates([r]), "候補に入れてはいけない: " + reason
+    R = [dict(un, path="/L/a/1.pdf"), dict(un, path="/L/a/2.pdf"), dict(paper, path="/L/a/3.pdf"), dict(un, path="/L/a/\u30ab\u3099.pdf")]
+    assert nonpaper_marks(R, {"/L/a/1.pdf": "t", "/L/a/2.pdf": "p", "/L/a/3.pdf": "b", "/L/a/\u30ac.pdf": "a"}) == (2, 1, 1, [], [])
+    assert (R[0]["kind"], R[0]["not_paper"]) == ("thesis", "user") and R[3]["kind"] == "patent", "論文以外に not_paper と種類を書いていない"
+    assert R[1]["kind"] == "paper" and "not_paper" not in R[1] and needs_human(R[1]) and not nonpaper_candidates([R[1]]), \
+        "論文として残す記録に not_paper を付けた、または候補に出し続ける"
+    assert "kind" not in R[2] and "not_paper" not in R[2], "同定済みの記録に種類を書いている"
+    assert nonpaper_marks(R, {"/L/a/none.pdf": "b", "/L/a/2.pdf": "z"}) == (0, 0, 0, ["/L/a/none.pdf"], ["z"]) and R[1]["kind"] == "paper", \
+        "索引に無いパス・知らないキーを報告しない、または知らないキーで書き換えた"
+    assert nonpaper_marks(R, {"/L/a/1.pdf": "p"})[:2] == (0, 1) and "not_paper" not in R[0], "論文に戻した記録に not_paper が残る"
+    D = os.path.join("/L", NONPAPER_DIR, KINDS["thesis"][1])
+    np_ = dict(un, not_paper="user", kind="thesis")
+    P = [np_, dict(np_, path="/L/b/x.pdf", folder="/L/b"), dict(np_, path=D + "/y.pdf", folder=D, filename="y.pdf"),
+         dict(np_, path="/L/a/gone.pdf", filename="gone.pdf"), dict(un, path="/L/a/k.pdf", filename="k.pdf", kind="paper"),
+         dict(un, path="/L/a/o.pdf", filename="o.pdf", not_paper="user"),
+         dict(np_, path="/L/a/d.pdf", filename="d.pdf", duplicate_of="/L/a/z.pdf"), dict(np_, path="/L/a/y.pdf", filename="y.pdf"),
+         dict(un, path="/L/a/h.pdf", filename="h.pdf", kind="thesis")]           # 種類だけあって not_paper の無い記録(手で直した索引)
+    disk = {r["path"] for r in P} - {"/L/a/gone.pdf"}
+    plan, gone = nonpaper_plan(P, "/L", exists=lambda p: p in disk)
+    assert [(r["path"], new) for r, new in plan] == [("/L/a/x.pdf", D + "/x.pdf"), ("/L/b/x.pdf", D + "/x_2.pdf"), ("/L/a/y.pdf", D + "/y_2.pdf")], \
+        "移動の予定: 種類のフォルダへ・もうそこにある記録は外す・同じ名前には _2・論文として残す記録と種類の無い記録と移した重複は動かさない: %s" % plan
+    assert gone == [P[3]], "ファイルの無い記録を予定に入れた、または報告しない"
+    assert all(v[1] for k, v in KINDS.items() if k != "paper") and len({v[0] for v in KINDS.values()}) == len(KINDS), "種類のキーかフォルダが重なる・欠ける"
+    assert not {v[0] for v in KINDS.values()} & set("ujko"), "種類のキーが、ページの操作のキー(u 取り消し・j/k 次と前・o 開く)と重なる"
+    assert _pages_in("Title:  x\nPages:          12\nEncrypted: no\n") == 12 and _pages_in("") is None and _pages_in(None) is None, "pdfinfo の出力から頁数を読めない"
+    # 大小文字・合成/分解だけが違う名前は、置き場のボリュームでは同じファイル。_2 を付けないと 2 つ目が 1 つ目を上書きする
+    C = [dict(np_, path="/L/a/Thesis.pdf", filename="Thesis.pdf"), dict(np_, path="/L/b/thesis.pdf", folder="/L/b", filename="thesis.pdf"),
+         dict(np_, path="/L/a/\u30ac.pdf", filename="\u30ac.pdf"), dict(np_, path="/L/b/\u30ab\u3099.pdf", folder="/L/b", filename="\u30ab\u3099.pdf")]
+    assert [os.path.basename(new) for _, new in nonpaper_plan(C, "/L", exists=lambda p: p in {r["path"] for r in C})[0]] == \
+        ["Thesis.pdf", "thesis_2.pdf", "\u30ac.pdf", "\u30ab\u3099_2.pdf"], "大小文字・合成/分解だけが違う名前を同じ移動先にしている(上書きで 1 件消える)"
+    # 置き場の根が変わると、移し済みのものを別の場所の同じフォルダへ動かす予定になる。種類の付け直し(別の種類のフォルダへ)は止めない
+    far = dict(np_, path="/X/L/" + NONPAPER_DIR + "/" + KINDS["thesis"][1] + "/x.pdf", folder="/X/L/" + NONPAPER_DIR + "/" + KINDS["thesis"][1])
+    relabel = dict(np_, path="/L/" + NONPAPER_DIR + "/" + KINDS["book"][1] + "/z.pdf", folder="/L/" + NONPAPER_DIR + "/" + KINDS["book"][1], filename="z.pdf")
+    pl = nonpaper_plan([far, relabel, np_], "/L", exists=lambda p: p in (far["path"], relabel["path"], np_["path"]))[0]
+    assert len(pl) == 3 and [r["path"] for r, _ in nonpaper_strays(pl)] == [far["path"]], "置き場の根が変わったときの移動を見分けない、または種類の付け直しまで止める"
+    # nonpaper-ok に渡すファイル: 見出しと空行は飛ばし、形の崩れた行・同じパスの 2 行目は読めない行として返す(黙って飛ばさない)
+    assert nonpaper_read("path\tkind\r\n/a/x.pdf\tt\r\n\n/a/y.pdf\t b \n") == ({"/a/x.pdf": "t", "/a/y.pdf": "b"}, [])
+    assert nonpaper_read("/a/x.pdf t\n/a/y.pdf\t\n/a/z.pdf\tt\n/a/z.pdf\tb\n") == ({"/a/z.pdf": "t"}, ["/a/x.pdf t", "/a/y.pdf\t", "/a/z.pdf\tb"]), \
+        "タブで割れない行・キーの無い行・同じパスの 2 行目を黙って読み飛ばしている"
+    N = [dict(un, path="/L/a/\u30ac.pdf")]
+    assert nonpaper_marks(N, {"/L/a/\u30ab\u3099.pdf": "t"})[0] == 1, "渡されたパスが分解形のとき、合成形の索引に当たらない"
+
     print("selftest: ok")
 
 
 CMDS = {"scan": scan, "add": add, "stats": stats, "rename": rename, "undo": undo,
         "review": review, "merge": merge, "pubver": pubver, "review-page": review_page, "review-ok": review_ok, "fix": fix, "info": info, "has": has, "cite": cite, "recent": recent, "relocate": relocate, "views": views, "move": move,
         "enrich": enrich, "dedup": dedup, "search": search, "index": build_db,
+        "nonpaper": nonpaper, "nonpaper-page": nonpaper_page, "nonpaper-ok": nonpaper_ok,
         "selftest": selftest}
 
 NO_INDEX_OK = ("scan", "add", "selftest")     # 索引が無くても動くコマンド(作る側と、何も読まない検査)

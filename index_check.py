@@ -21,6 +21,8 @@ selftest に入れないのは意図(CLAUDE.md): ここは一時ディレクト�
      無ければ同定も退避もしない
   P. scan・add は、前回外部から取れなかった記録(error で fetch_failed あり)だけを同定し直し、同じパスの行を 2 つにしない。
      読み取りのエラー(fetch_failed なし)は取り直さない
+  R. nonpaper は既定で動かさない。nonpaper-ok は索引に無いパス・知らない種類があれば書かない。--apply で退避してから
+     ファイルと索引を一緒に動かし、undo で戻る。nonpaper-page は頁数を調べて索引に書き、候補だけをページに出す
 C は規約 1 の機械化: 新しい書き込み経路を足すと、ここで名指しで落ちる。
 許可リストに足すなら、なぜ _atomic_write を通さなくてよいかをコメントに書くこと。
 実行: python3 index_check.py
@@ -422,7 +424,8 @@ def check_move(d):
     assert by["10.1/x"]["path"] == new and by["10.1/x"]["folder"] == os.path.dirname(new), "索引を直していない"
     assert by["10.1/y"]["duplicate_of"] == new, "動かしたファイルを指す項目を直していない"
     O.sys.argv = ["organize.py", "undo"]; O.undo()
-    assert os.path.exists(x) and json.loads(open(O.INDEX).readline())["path"] == x, "undo で戻らない"
+    back = json.loads(open(O.INDEX).readline())
+    assert os.path.exists(x) and back["path"] == x and back["folder"] == os.path.dirname(x), "undo で戻らない(ファイル・パス・フォルダ)"
     print("M ok: 既定は動かさない、置き場の外・名前のぶつかりは止まる、ファイルと索引と指す先を一緒に動かす、undo で戻る")
 
 
@@ -458,11 +461,12 @@ def check_add(d):
     base = {"rung": "text_doi", "source": "crossref", "year": 2016, "first_author": "Miller", "journal": "ACS Nano",
             "volume": "10", "pages": "2803-2818", "doi": "10.1/x", "title": "Old", "text": "Old paper"}
     write(O.INDEX, [dict(base, path=old, folder=lib, filename=os.path.basename(old))])
-    real, calls = (O.resolve, O.enrich, O.build_db), []
+    real, calls, real_pages = (O.resolve, O.enrich, O.build_db), [], O.pdf_pages
     O.resolve = lambda p: calls.append("resolve") or dict(base, path=p, folder=lib, filename=os.path.basename(p), year=2020,
                                                           doi="10.1/n", title="New", text="New paper")
     O.enrich = lambda: calls.append("enrich")
     O.build_db = lambda: calls.append("index") or stub_db(O.DB)
+    O.pdf_pages = lambda p: 7
     def run(*args):
         O.sys.argv = ["organize.py", "add"] + list(args)
         out = io.StringIO()
@@ -480,6 +484,7 @@ def check_add(d):
         recs = [json.loads(l) for l in open(O.INDEX)]
         assert [r["filename"] for r in recs] == [os.path.basename(old), "new.pdf"], "新しい PDF を索引に足していない"
         assert os.path.exists(new) and os.path.exists(old), "add がファイルを動かした"
+        assert recs[1].get("n_pages") == 7 and "=== 論文以外" in out, "新しい記録の頁数を記録していない、または論文以外の予定を出していない"
         assert calls == ["resolve", "enrich", "index"], "同定・抄録・検索の索引の順に進んでいない: %s" % calls
         assert len(backups()) == 1 and len(open(backups()[0]).readlines()) == 1, "足す前の索引を退避していない"
         report = out.split("=== 重複")[0]
@@ -502,6 +507,7 @@ def check_add(d):
             "重複の予定を出していない、または dry run で動かした"
     finally:
         O.resolve, O.enrich, O.build_db = real
+        O.pdf_pages = real_pages
     print("O ok: add は --apply を受けない、退避してから足す、ファイルは動かさない、無ければ何もしない")
 
 
@@ -555,6 +561,125 @@ def check_retry(d):
     finally:
         O.resolve, O.enrich, O.build_db = real
     print("P ok: 取れなかった記録だけを取り直す、行を増やさない、外す前に退避する、取れたら新しい記録として報告する")
+
+
+def check_nonpaper(d):
+    """R. 一時ディレクトリの置き場で、論文以外の候補のページ・判定の取り込み・移動を回す。"""
+    import contextlib, io, shutil
+    root = os.path.join(d, "r"); lib = os.path.join(root, "lib")
+    for sub in ("a", "b"):
+        os.makedirs(os.path.join(lib, sub))
+    shutil.copy2(os.path.join(os.path.dirname(os.path.abspath(__file__)), "nonpaper_page.html"), root)
+    O.ROOT, O.INDEX = root, os.path.join(root, "r.jsonl")
+    def rec(sub, name, **kw):
+        p = os.path.join(lib, sub, name); open(p, "w").write("%PDF " + sub)
+        return dict({"path": p, "folder": os.path.dirname(p), "filename": name, "rung": "unresolved"}, **kw)
+    recs = [rec("a", "thesis.pdf"), rec("b", "thesis.pdf"), rec("a", "short.pdf"),
+            rec("a", "paper.pdf", rung="text_doi", source="crossref", year=2016, first_author="A", doi="10.1/x"), rec("a", "broken.pdf")]
+    recs[3]["duplicate_of"] = recs[0]["path"]                    # 動かすファイルを指す項目(repoint が直す)
+    recs[0]["text"] = "see __KINDS__ and __PAGES__ </script>"   # 本文は外から来る。ページの型の印と同じ文字列があっても壊さない
+    write(O.INDEX, recs)
+    real, real_rename, asked = O.pdf_pages, os.rename, []
+    O.pdf_pages = lambda p: asked.append(p) or (None if p.endswith("broken.pdf") else 20 if p.endswith("short.pdf") else 120)
+    def run(fn, *a):
+        O.sys.argv = ["organize.py", "x"] + list(a)
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                fn()
+            return "ok"
+        except SystemExit:
+            return "exit"
+    load = lambda: {os.path.relpath(r["path"], lib): r for r in map(json.loads, open(O.INDEX))}
+    try:
+        assert run(O.nonpaper_page) == "ok"
+        by, page = load(), open(os.path.join(root, "nonpaper.html")).read()
+        assert by["a/thesis.pdf"]["n_pages"] == 120 and by["a/short.pdf"]["n_pages"] == 20, "頁数を調べて索引に書いていない"
+        assert "n_pages" not in by["a/paper.pdf"], "同定済みの記録の頁数まで調べている(全件を読むことになる)"
+        assert "n_pages" not in by["a/broken.pdf"], "読めなかった頁数を書いている(次から調べ直さなくなる)"
+        del asked[:]
+        assert run(O.nonpaper_page) == "ok" and asked == [recs[4]["path"]], "頁数の読めなかった記録だけを調べ直していない: %s" % asked
+        assert glob.glob(os.path.join(root, "backups", "*before-nonpaper-page*")), "頁数を書く前に索引を退避していない"
+        assert page.count("thesis.pdf") >= 2 and "short.pdf" not in page and "paper.pdf" not in page and "__DATA__" not in page, \
+            "ページに候補(未同定で頁数の多い記録)だけを出していない、または型の印が残っている"
+        data = json.loads(page.split('<script id="data" type="application/json">')[1].split("</script>")[0])
+        assert "const KINDS = [[" in page and any("__KINDS__ and __PAGES__" in r["head"] for r in data) and "超える" in page and "__PAGES__ 頁" not in page, \
+            "型の印を記録より後に置き換えている(本文に同じ文字列があるとページが壊れる)、または置き換えていない"
+        ok = os.path.join(root, "nonpaper-ok.tsv")
+        before = open(O.INDEX).read()
+        assert run(O.nonpaper_ok, ok) == "exit" and open(O.INDEX).read() == before, "渡されたファイルが無いのに止まらない"
+        for body, why in (("path\tkind\n", "判定の行が無い"), ("%s t\n" % recs[0]["path"], "タブで割れない行"),
+                          ("%s\tt\n%s\tb\n" % (recs[0]["path"], recs[0]["path"]), "同じパスが 2 行")):
+            open(ok, "w").write(body)
+            assert run(O.nonpaper_ok, ok) == "exit" and open(O.INDEX).read() == before and not glob.glob(os.path.join(root, "backups", "*before-nonpaper-ok*")), \
+                "書かずに止まるべき: " + why
+        open(ok, "w").write("path\tkind\n%s\tt\n%s\tb\n" % (recs[0]["path"], os.path.join(lib, "a", "none.pdf")))
+        assert run(O.nonpaper_ok, ok) == "exit" and open(O.INDEX).read() == before, "索引に無いパスがあるのに書いた"
+        open(ok, "w").write("path\tkind\n%s\tt\n%s\tz\n" % (recs[0]["path"], recs[1]["path"]))
+        assert run(O.nonpaper_ok, ok) == "exit" and open(O.INDEX).read() == before, "知らない種類があるのに書いた"
+        open(ok, "w").write("path\tkind\n%s\tt\n%s\tt\n" % (recs[0]["path"], recs[1]["path"]))
+        assert run(O.nonpaper_ok, ok) == "ok" and load()["a/thesis.pdf"]["kind"] == "thesis" and os.path.exists(recs[0]["path"]), \
+            "判定を索引に書いていない、または取り込みでファイルを動かした"
+        assert glob.glob(os.path.join(root, "backups", "*before-nonpaper-ok*")), "判定を書く前に索引を退避していない"
+        before = open(O.INDEX).read()
+        dest = os.path.join(lib, O.NONPAPER_DIR, O.KINDS["thesis"][1])
+        assert run(O.nonpaper) == "ok" and os.path.exists(recs[0]["path"]) and not os.path.exists(dest) and open(O.INDEX).read() == before, \
+            "--apply 無しで動かした(またはフォルダを作った)"
+        assert run(O.nonpaper, "--apply") == "ok"
+        by = load()
+        moved = sorted(os.listdir(dest))
+        assert moved == ["thesis.pdf", "thesis_2.pdf"] and not os.path.exists(recs[0]["path"]) and not os.path.exists(recs[1]["path"]), \
+            "ファイルを種類のフォルダへ動かしていない、または同じ名前を上書きした: %s" % moved
+        assert sorted(r["folder"] for r in by.values() if r.get("kind")) == [dest, dest] and all(os.path.exists(r["path"]) for r in by.values()), \
+            "索引のパスを直していない"
+        assert glob.glob(os.path.join(root, "backups", "*before-nonpaper.jsonl")) and glob.glob(os.path.join(root, "renames-*.jsonl")), \
+            "動かす前に索引を退避していない、または記録を残していない"
+        assert by["a/paper.pdf"]["duplicate_of"] == os.path.join(dest, "thesis.pdf"), "動かしたファイルを指す項目を直していない"
+        far = os.path.join(d, "r-outside"); os.makedirs(far, exist_ok=True)      # 置き場の外の記録が入ると、根が変わる
+        open(os.path.join(far, "o.pdf"), "w").write("%PDF")
+        with open(O.INDEX, "a") as f:
+            f.write(json.dumps({"path": os.path.join(far, "o.pdf"), "folder": far, "filename": "o.pdf", "rung": "unresolved"}) + "\n")
+        assert run(O.nonpaper, "--apply") == "exit" and sorted(os.listdir(dest)) == moved, "置き場の根が変わったのに、移し済みのファイルを動かした"
+        write(O.INDEX, [r for r in map(json.loads, open(O.INDEX)) if r["folder"] != far])
+        assert run(O.nonpaper, "--apply") == "ok" and sorted(os.listdir(dest)) == moved, "もう種類のフォルダにある記録を動かし直した"
+        assert run(O.undo) == "ok" and os.path.exists(recs[0]["path"]) and os.path.exists(recs[1]["path"]) and not os.listdir(dest), "undo で戻らない"
+        assert all(os.path.exists(r["path"]) and r["folder"] == os.path.dirname(r["path"]) for r in load().values()), \
+            "undo のあと索引のパスかフォルダが戻っていない"
+        n = []                                                   # 2 件目の移動で失敗させる: 動かした 1 件は索引に書く
+        def flaky(a, b):
+            n.append(1)
+            if len(n) == 2:
+                raise OSError("EXDEV")
+            return real_rename(a, b)
+        os.rename = flaky
+        try:
+            O.sys.argv = ["organize.py", "nonpaper", "--apply"]
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                O.nonpaper()
+            failed = False
+        except OSError:
+            failed = True
+        os.rename = real_rename
+        by = load()
+        assert failed and len(os.listdir(dest)) == 1 and all(os.path.exists(r["path"]) and r["folder"] == os.path.dirname(r["path"]) for r in by.values()), \
+            "移動の途中で失敗したとき、動かした分を索引に書いていない(索引が無いパスを指す)"
+        left = [r for r in by.values() if r.get("kind") and r["folder"] != dest][0]
+        there = os.path.join(dest, "thesis.pdf")               # 予定が見分けられなかった同名(予定のあとに現れた等)は上書きしない
+        keep, real_plan = open(there).read(), O.nonpaper_plan
+        O.nonpaper_plan = lambda recs, root: ([(r, there) for r in recs if r["path"] == left["path"]], [])
+        try:
+            O.sys.argv = ["organize.py", "nonpaper", "--apply"]
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                O.nonpaper()
+            stopped = False
+        except FileExistsError:
+            stopped = True
+        O.nonpaper_plan = real_plan
+        assert stopped and open(there).read() == keep and os.path.exists(left["path"]), "移動先にあるファイルを上書きした"
+        assert run(O.nonpaper, "--apply") == "ok" and sorted(os.listdir(dest)) == ["thesis.pdf", "thesis_2.pdf"], "失敗のあとの再実行で残りを動かさない"
+    finally:
+        O.pdf_pages, os.rename = real, real_rename
+    print("R ok: 頁数を調べて候補だけをページに出す、判定は索引に無いパス・知らない種類があれば書かない、既定は動かさない、"
+          "退避してからファイルと索引を一緒に動かす、undo で戻る")
 
 
 def check_search_db(d):
@@ -652,5 +777,6 @@ if __name__ == "__main__":
         check_scan_guard(d)
         check_add(d)
         check_retry(d)
+        check_nonpaper(d)
         check_search_db(d)
     print("index_check: ok")

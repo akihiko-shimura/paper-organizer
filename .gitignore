@@ -15,6 +15,8 @@ unresolved.txt
 published.tsv
 review.html
 review-ok.tsv
+nonpaper.html
+nonpaper-ok.tsv
 dedup-keep.txt
 renames-*.jsonl
 dedup-*.jsonl
