@@ -17,7 +17,8 @@ model: sonnet
 
 ```bash
 papers info --json                       # 場所・件数・検索の索引が古いか(db_stale)・パスの無い記録(missing_files)
-papers search '<式>' --json --n=50       # 本文を外した JSON。AND・OR・NOT・"語句"・列名:(title・author・journal など)
+papers search '<式>' --json --n=50       # 本文を外した JSON。AND・OR・NOT・"語句"・列名:(title・author・journal・fulltext など)
+                                         # --kind=paper|book|other で種類を絞る。"matched": "fulltext" は、全頁の本文を入れて初めて式に当たる記録(fulltext: を名指しした式には付かない)
 papers has <DOI や arXiv ID…>            # 持っているかを完全一致で
 papers cite <DOI・ファイル名の一部>       # BibTeX
 papers add [<フォルダ>]                   # 新しい PDF を足し、重複・改名の予定まで出す(ファイルは動かさない)
@@ -34,9 +35,9 @@ sqlite3 -list -separator ' | ' "<db>" "SELECT … FROM p WHERE p MATCH '…'"   
 
 ## 追加（新しい PDF を索引に足す）を頼まれたとき
 
-1. `papers add` を実行する（フォルダを言われたら `papers add "<フォルダ>"`）。索引への追記・抄録・検索の索引までは、
+1. `papers add` を実行する（フォルダを言われたら `papers add "<フォルダ>"`）。索引への追記・抄録・全頁の本文・検索の索引までは、
    承認を待たずに進めてよい（ファイルは動かない。足す前の索引は `backups/` に退避される。呼ぶ API は Crossref・arXiv・
-   OpenAlex で無料）。出力は長いことがあるので、ファイルに取って読む:
+   OpenAlex で無料。全頁の本文は手元で読み、スキャンは全頁を OCR するので 1 頁 1 秒ほどかかる）。出力は長いことがあるので、ファイルに取って読む:
    `papers add > /tmp/paper-librarian-add-<日時>.txt 2>&1`
    - 「新しい PDF は無い」と出たら、その旨と、重複・改名の予定が残っているか（出力の dry run）だけを返して終わる
 2. 止まったとき:

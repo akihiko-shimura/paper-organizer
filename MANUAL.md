@@ -14,7 +14,8 @@ For now, the output of the commands (messages) is in Japanese only.
 |---|---|---|
 | Paper PDFs | Under `<library>/` (any folder layout) | Identified files are renamed to `year_firstauthor_shortjournal_volume_issue_firstpage.pdf` (example: `2019_Smith_OptExpress_27_8_11018.pdf`) |
 | Index (master copy) | `<repo>/papers.jsonl` | One paper per line. DOI, title, authors, journal, abstract, the first 3,000 characters of the text, and so on |
-| Search index | `<repo>/papers.db` | SQLite built from `papers.jsonl`. **Do not edit it directly** (only rebuild it) |
+| Search index | `<repo>/papers.db` | SQLite built from `papers.jsonl` and the full text. **Do not edit it directly** (only rebuild it) |
+| Full text | `<repo>/fulltext/` | The text of every page of each PDF (OCR for scans). Used only for search. Safe to delete (`papers fulltext` reads it again) |
 | Settings | `<repo>/config.json` (optional; the sample is `config.example.json`) | Contact email address (`mailto`), output location of the views (`views`) |
 | Command `papers` | `~/.local/bin/papers` → link to `<repo>/organize.py` | Works from any directory |
 | skill `paper-search` | `~/.claude/skills/paper-search` → `<repo>/skills/paper-search` | Gives AI agents (Claude Code) the instructions for use |
@@ -30,7 +31,7 @@ Use `papers info` to see locations, update times, sizes and record counts (read-
 索引          /Users/…/paper-organizer/papers.jsonl
               更新 2026-09-23 17:25 ・ 15.3 MB ・ 3248 件（解決済み 2232 ・ 人手行き 842 ・ 重複として移した 129）
 検索の索引    /Users/…/paper-organizer/papers.db
-              更新 2026-09-23 17:26 ・ 72.7 MB ・ 3248 件
+              更新 2026-09-23 17:26 ・ 597.0 MB ・ 3248 件(全頁の本文あり 3248 件)
 最後の改名    2026-09-23 17:25
 最新の退避    /Users/…/backups/papers-20260923-172530-before-rename.jsonl
 ```
@@ -61,6 +62,7 @@ papers search "fiber laser" --n=30              # change the number of results
 papers search "fiber laser" --full              # print title, DOI and abstract without truncating
 papers search "fiber laser" --json              # JSON, one record per line (for agents; the text is left out)
 papers search "fiber laser" --json --with-text  # also include the text (the first 3,000 characters of pages 1–2) (output is about 2.5 times larger)
+papers search "fiber laser" --kind=paper       # filter by kind (paper, book, other)
 ```
 
 ### Browsing in Finder: `views`
@@ -118,8 +120,17 @@ papers recent --n=20        # most recently added to the index first. --json is 
 
 ### Search rules
 
-- **Columns searched**: title, authors, journal, DOI, abstract, folder name, the first 3,000 characters of the text. The weights are title > DOI, authors >
-  journal > abstract > folder > text
+- **Columns searched**: title, authors, journal, DOI, abstract, folder name, the first 3,000 characters of the text, and the full text of every page.
+  The weights are title > DOI, authors > journal > abstract > folder > text
+- **Order of results**: records that match in the title, authors, journal, DOI, abstract, folder name or the first 3,000 characters come first.
+  Records that match only when the full text is searched come after them (the line `-- the records below match only when the full text is searched …`
+  marks the boundary). This keeps a paper with the terms in its title from being buried under papers that mention a term once on a later page
+  - If the first group fills `--n`, the second group is not shown. To look for a term deep in the text, narrow the query or name the `fulltext:` column (table below)
+  - Input with no term of 3 or more characters (the "separate path" below) follows the same rule: records that match in the title or the start of the text
+    come first, records that match only in the full text come after
+  - An expression that names `fulltext:` is different: all its matches are ranked together with the full text included, and no boundary line is printed
+    (long documents tend to rank lower)
+  - `--mode=vec` and `--mode=hybrid` do not look at the full text
 - **How terms are handled**: terms of 3 or more characters are searched with OR, and a partial match is enough (`Smit` finds Smith)
   - A term is a run of one of these:
     - Letters and digits, including accented Latin letters (`Müller` and `Schrödinger` are one term each)
@@ -142,7 +153,7 @@ papers recent --n=20        # most recently added to the index first. --json is 
     (`note: terms shorter than 3 characters were not used: 発振`)
   - An input with no term of 3 or more characters (`整合`, `Si`, `発振 制御`) is, in the default search, split at spaces, and records containing
     any of the terms are found by substring match. In that case:
-    - Only the title and the text are searched (not authors, journal, DOI, abstract or folder name)
+    - Only the title and the text (the first 3,000 characters and the full text) are searched (not authors, journal, DOI, abstract or folder name)
     - Records containing more of the terms come first (`発振 制御` lists records with both first), and the list is cut off at `--n` records.
       Relevance is not ranked beyond that. No text snippet is shown
     - A short term also matches inside other words (`Si` matches "basis"; ASCII letters match regardless of case). To match it as a word,
@@ -150,13 +161,15 @@ papers recent --n=20        # most recently added to the index first. --json is 
       Only the quoted form is matched (`Si,` and `-Si` are missed; `" Si "` finds fewer than half of the records that contain the word). For full coverage, search for plain `Si` and narrow down. A 2-letter ASCII term
       matches almost every record, so this path is useful mainly for kanji and kana terms
     - `%` and `_` are searched for literally (`T_c` finds T_c, `50%` finds 50%)
-- **Of the text, only the first 3,000 characters of pages 1–2 are searched.** For most papers that ends partway down page 1 (title, authors, abstract and
-  the start of the introduction). Look for terms deeper in the text with Spotlight (macOS; it queries the index macOS builds, not the one `papers` builds):
-
-  ```bash
-  mdfind -onlyin "<library>" "Kramers-Kronig"
-  ```
-
+- **The full text** is read by `papers fulltext` and kept in `<repo>/fulltext/` (`papers add` also reads it for every file not read yet).
+  - PDFs with almost no text layer (scans) are OCRed on every page (about 1 second per page). For each page, whichever of the text layer and the OCR
+    has more characters is kept. Misread words cannot be found
+  - Files that could not be read or OCRed (broken PDFs, files that are not PDFs) are listed with the reason and are tried again on the next call.
+    If their first 3,000 characters are in the index, they can still be found by those
+  - If the search index is rebuilt while the library cannot be seen (the sync folder is not open), the full text is carried over from the previous index
+  - `papers info` says so when some records have not been read yet. `text` in `papers.jsonl` is still the first 3,000 characters (used for identification)
+- **Filter by kind**: `--kind=paper` (papers), `--kind=book` (books and handbooks), `--kind=other` (theses, lecture notes, documents, patents).
+  Separate several with commas (`--kind=paper,book`). Without it, everything is searched. The kinds are the ones assigned in §5 "Setting non-papers aside"
 - `--mode=vec` (semantic similarity) and `--mode=hybrid` also exist, but within the range that was measured they are worse than the default (`fts`), so do not use them
 - The results also include records that are not identified (year and author are `-`). Judge by the file name and the excerpt of the text
 - Duplicates moved by dedup (`_重複文献/` (duplicates) and `_プレプリント(出版版あり)/`, which the user is expected to delete) are not shown. Use `--all` to show them
@@ -176,7 +189,10 @@ If you write an operator in the query, the results are narrowed by that expressi
 | `papers search '(laser OR amplifier) AND fiber NOT title:review'` | Combine with parentheses |
 
 - `AND`, `OR` and `NOT` are **upper case** (a lower-case `and` is treated as an ordinary term and the query becomes an OR search). `NOT` needs a term before it
-- Column names: `title`, `author` (all authors), `first_author`, `journal`, `doi`, `abstract`, `folder`, `text` (the first 3,000 characters of the text)
+- Column names: `title`, `author` (all authors), `first_author`, `journal`, `doi`, `abstract`, `folder`, `text` (the first 3,000 characters of the text),
+  `fulltext` (the full text of every page). `'fulltext:"Kramers-Kronig"'` looks only at the full text
+- For the group listed first, `NOT` is judged on the first 3,000 characters (`laser NOT review` keeps a paper that says "review" only on a later page).
+  To judge it on every page, name the `fulltext:` column (`'laser NOT fulltext:review'`)
 - Enclose terms that contain a hyphen or a symbol in quotation marks (`"second-harmonic"`. Without them the command stops with a syntax error and shows how to fix it)
 - Terms of 2 characters or fewer (`CW`, `UV`) cannot be looked up in the index. If you put one in an expression, a warning is shown and that condition matches 0 records. Two exceptions:
   - In the author columns (`author:`, `first_author:`) a surname of 2 characters or fewer is matched as a word (`author:Li` finds Li only, not Lin or Oliver).
@@ -190,13 +206,15 @@ You can also query directly with SQL (read-only. Without `-list`, a recent sqlit
 sqlite3 -list -separator ' | ' "<repo>/papers.db" "SELECT year, trim(first_author), title, path FROM p WHERE p MATCH 'title:laser AND title:fiber' ORDER BY bm25(p) LIMIT 20"
 ```
 
+There are two tables. `p` has the columns above; `f` has the same columns plus `fulltext` (the text of every page, with a form feed between pages).
+
 ## 3. For AI agents (when searching)
 
 In Claude Code, the skill `paper-search` is loaded by requests such as "find it among my papers" and gives the agent the following.
 For an agent without the skill, have it read this file.
 
 1. Query with `papers search "<term>" --json --n=20`. Query again 2 to 4 times, rephrasing the title, authors, journal and field.
-   If nothing is found, search the text with `mdfind`. If the DOI or arXiv ID is known, use `papers has` instead of searching
+   Records that match only when the full text is searched are listed after the separator line (`"matched": "fulltext"` with `--json`). If the DOI or arXiv ID is known, use `papers has` instead of searching
 2. Attach the **file path** to the answer. State bibliographic data (year, journal, DOI) as fact only when the `rung` is one that §1 marks "Can be trusted".
    Write the DOI of an `unverified` record as a "candidate"
 3. `published_doi` is the DOI of the published version (the PDF held is a preprint). `page_title` is the title that Claude Haiku read from the first page
@@ -216,7 +234,7 @@ papers add                    # add the new PDFs and go as far as showing the pl
 The very first time only, give the library folder (the index is empty, so the library folder is not yet known): `papers add <library>`.
 
 What `add` does: back up the index → identify and add only the new files → fetch abstracts → **report the new records** → dry run of duplicates and
-renames → search index. If you give a folder (`papers add <folder>`), it looks only under that folder.
+renames → read the full text of every file not read yet (scans are OCRed on every page; the whole index is covered even if you give a folder) → search index. If you give a folder (`papers add <folder>`), it looks only under that folder.
 
 - For each record, the report shows the "record (authors, year, journal, title)" next to the "beginning of the text". **Check whether these two lines are the same paper**
   (`add` does not judge this). For a PDF with a cover page, the beginning of the text is taken from page 2
@@ -249,7 +267,7 @@ papers enrich                 # abstracts from OpenAlex (only records without an
 papers dedup                  # check the duplicates (dry run) → if there is no problem, papers dedup --apply
 papers review                 # write the ones that could not be identified to unresolved.tsv (with candidates where there are any)
 papers rename                 # check the renames (dry run) → if there is no problem, papers rename --apply
-papers index                  # rebuild the search index (about 15 seconds for a few thousand records)
+papers index                  # rebuild the search index (about 30 seconds for 3,000 records)
 ```
 
 - `scan` skips the paths that are already in the index, so you can run it any number of times. If you stop it partway, it resumes where it left off. It takes a few seconds per file
@@ -374,6 +392,18 @@ papers relocate            # only show the matches
 papers relocate --apply    # back up the index, then write
 papers index
 ```
+
+To drop the records of files you deleted yourself, add `--forget`:
+
+```bash
+papers relocate --forget            # only show the records that would be dropped
+papers relocate --forget --apply    # back up the index, then drop them
+```
+
+- A record that a moved duplicate or preprint still points to is kept even if its file is gone (a note is printed). If no file at all was found,
+  the command stops (the library may simply not be visible)
+- Apart from those, `--forget` drops every record that could not be matched to any file. A file that has merely not finished syncing is also listed as not found,
+  so read the list before `--apply` (the backup lets you restore)
 
 - A record is matched to a file that has the same name and whose text on pages 1 to 3 also agrees. If you changed the name too, the file is searched for by text alone. Scans with no text
   are matched by name alone (shown as 「名前だけ」, matched by name only). Those that cannot be decided are only shown, not written

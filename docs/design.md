@@ -396,10 +396,31 @@ dependency and a model download, which does not fit "standard library only"; if 
 ### What is not handled
 
 Accented names are found by their ASCII spelling and the reverse (`remove_diacritics`; an older SQLite without it falls back, with a note),
-except for letters that do not decompose (`ø`, `ł`). Only the first
-3,000 characters of each PDF are indexed (Spotlight covers the rest on macOS).
+except for letters that do not decompose (`ø`, `ł`). The text of scanned PDFs
+comes from OCR, so misread words are not found.
+
+### Full text
+
+`papers fulltext` reads the text of every page of each PDF and keeps it in `fulltext/`. It does not go into the
+index (`papers.jsonl`); `text`, which identification uses, stays the first 3,000 characters.
+
+- **The key is made from the file's content** (its size and its first and last 64 KB). A key made from the path
+  would force a re-read after every rename or move.
+- **Reading** uses `pdftotext`. If it does not finish in 30 seconds or fails, PDFKit reads the file instead. One
+  PDF in the author's library took 97 seconds for a single page with `pdftotext` and 0.1 seconds with PDFKit.
+- **PDFs with almost no text layer** (under 200 characters per page on average) are OCRed on every page.
+- **The search index has two tables.** `p` has the columns it always had; `f` has the same columns plus the full
+  text. Records that match in `p` are listed first, in `p`'s order; records that match only in `f` follow.
+- **Why not one table.** bm25 divides by document length, so putting the full text in the same table lowers the
+  rank of long papers. For eight phrases on the author's library, 47 of the 80 top-10 results stayed the same with
+  one table (45 even with the full-text weight set to 0). With two tables all 80 stay.
+- For 60 words that occur only after the first 3,000 characters, the old index found 0; with the full text, 60
+  matched and 50 were in the top 10.
+- The search index is built under another name and then swapped in, so an interrupted build leaves the old one.
 
 ### Compared with Spotlight
+
+The measurements below were made before the full text was indexed.
 
 **What Spotlight alone does and does not do.** Measured with `mdfind` restricted to the library, using
 `kMDItemTextContent == "*…*"cd` (a substring match on the indexed text):
@@ -414,12 +435,12 @@ except for letters that do not decompose (`ø`, `ł`). Only the first
 
 For keywords, both tools find the papers whose title carries the words. The difference is what surrounds them:
 Spotlight returns every file that mentions the words anywhere in its full text, unranked through `mdfind`, so
-on-topic papers are a small share of a long list. `papers search` sees less text (3,000 characters), which removes
-most passing mentions, and ranks title matches first. The relevance value Spotlight computes
+on-topic papers are a small share of a long list. At the time, `papers search` saw less text (3,000 characters), which removed
+most passing mentions; it ranks title matches first. The relevance value Spotlight computes
 (`kMDQueryResultContentRelevance`) came back empty through `NSMetadataQuery` for three query forms, so its
 on-screen ordering is unmeasured.
 
-So recall for text that exists is good, and Spotlight is the right tool for phrases deep inside a paper. It cannot
+So recall for text that exists is good, and at the time Spotlight was the right tool for phrases deep inside a paper. It cannot
 answer by identifier when the identifier is not printed, it cannot separate an author from a cited name, and on
 this machine it did not index scanned pages. Caveats: the surname test is a substring match, so a short name inside
 a longer word also counts; the scan test uses words from this tool's own OCR, some of which may be misread; in the
@@ -491,7 +512,7 @@ Collected from the notes above, plus items recorded only in the working notes.
 **Sharing**
 
 - Data lives in the repository folder and paths are absolute; one index cannot be used from two machines
-- macOS-only components: Vision OCR, `NLEmbedding`, keychain, Spotlight
+- macOS-only components: Vision OCR, PDFKit (fallback reader for the full text), `NLEmbedding`, keychain, Spotlight
 
 ## 16. Measurements in one place
 

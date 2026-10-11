@@ -8,7 +8,7 @@ Design: identification is a *lookup*, never a generation.  Every rung below prod
 candidate identifier or title; the authority (Crossref/arXiv) produces the field values.
 An unverifiable candidate becomes 'unresolved' rather than a guess.
 """
-import collections, difflib, html, json, os, re, shutil, sqlite3, subprocess, sys, time, unicodedata
+import collections, difflib, hashlib, html, json, os, re, shutil, sqlite3, subprocess, sys, time, unicodedata
 import urllib.error, urllib.parse, urllib.request
 
 ROOT = os.path.dirname(os.path.realpath(__file__))   # ~/.local/bin/papers などのリンク経由でも本体の場所
@@ -926,7 +926,10 @@ def add():
     rename()
     print("\n=== 論文以外(dry run。本・学位論文・講義ノートなど)")
     nonpaper()
-    if not _db_format_ok() or os.path.getmtime(DB) < os.path.getmtime(INDEX):
+    print("\n=== 全頁の本文(検索用。スキャンは全頁を OCR する)")
+    got, failed = fulltext_fill(load_index()[0])
+    fulltext_report(got, failed)
+    if got["read"] or got["ocr"] or not _db_format_ok() or os.path.getmtime(DB) < os.path.getmtime(INDEX):
         print("\n=== 検索の索引")
         build_db()
     print("\n動かすのは利用者の承認のあと:\n"
@@ -1594,9 +1597,10 @@ def carry_preprint_ids(recs, gone):
 
 
 def relocate():
-    """papers relocate [--root 論文の置き場] [--apply]。手で動かした(名前も変えた)ファイルを索引の記録に対応付け直す。
+    """papers relocate [--root 論文の置き場] [--forget] [--apply]。手で動かした(名前も変えた)ファイルを索引の記録に対応付け直す。
     既定は対応を見せるだけ。--apply で索引を退避してから書く。dedup が移した重複でファイルが消えたもの(利用者が
-    消した)は索引から外す。そのあと papers index。"""
+    消した)は索引から外す。--forget を付けると、どのファイルにも当たらない「見つからない」記録も索引から外す
+    (自分で消したファイルの記録。同期が済んでいないだけのファイルも「見つからない」に出るので、一覧を見てから)。そのあと papers index。"""
     import glob
     recs, stamp = load_index()
     root = sys.argv[sys.argv.index("--root") + 1] if "--root" in sys.argv else os.path.commonpath([r["folder"] for r in recs])
@@ -1620,15 +1624,28 @@ def relocate():
         print("  移動  %s\n     → %s  (%s)" % (rel(r["path"]), rel(p), how))
     for r, ps in amb:
         print("  決まらない  %s\n     候補: %s" % (rel(r["path"]), " / ".join(rel(p) for p in ps[:4])))
+    # 見つからない記録を外す(--forget)。ほかの記録(移した重複・プレプリント)が指している記録は外さない: 外すと、指す先の無い
+    # 「移した重複」が残り、ファイルがあるのに検索に出なくなる
+    pointed = {r.get(k) for r in recs for k in ("duplicate_of", "published_copy") if id(r) not in {id(g) for g in gone}} - {None}
+    forget = [r for r in lost if r["path"] not in pointed] if "--forget" in sys.argv else []
+    if forget and (not os.path.isdir(root) or len(forget) == sum(1 for r in recs if not moved_aside(r))):
+        sys.exit("stopped: the library folder is missing or no record's file was found (%s). "
+                 "It may not be mounted or synced; --forget would empty the index" % root)
     for r in lost:
-        print("  見つからない  %s" % rel(r["path"]))
-    print("対応 %d ・ 決まらない %d ・ 見つからない %d ・ 消えた重複(索引から外す) %d" % (len(got), len(amb), len(lost), len(gone)))
+        print("  %s  %s" % ("見つからない(索引から外す)" if any(r is x for x in forget) else "見つからない", rel(r["path"])))
+    print("対応 %d ・ 決まらない %d ・ 見つからない %d%s ・ 消えた重複(索引から外す) %d"
+          % (len(got), len(amb), len(lost), "(うち %d 件を索引から外す)" % len(forget) if "--forget" in sys.argv else "", len(gone)))
+    if "--forget" in sys.argv and len(forget) < len(lost):
+        print("note: %d missing record(s) are kept because a moved duplicate or preprint still points to them"
+              % (len(lost) - len(forget)), file=sys.stderr)
+    if lost and "--forget" not in sys.argv:
+        print("note: if you deleted these files yourself, drop their records with: papers relocate --forget", file=sys.stderr)
     left = len(new_files) - len(got)
     if left:
         print("どの記録にも当たらない PDF %d 件は新しいファイル: papers scan で足す" % left)
     if "--apply" not in sys.argv:
         print("DRY RUN. 書くには --apply"); return
-    if not got and not gone:
+    if not got and not gone and not forget:
         return
     _backup("relocate")
     moved = {}
@@ -1637,7 +1654,7 @@ def relocate():
         r.update(path=p, folder=os.path.dirname(p), filename=os.path.basename(p))
     repoint(recs, moved)
     carry_preprint_ids(recs, gone)
-    drop = {id(r) for r in gone}
+    drop = {id(r) for r in gone + forget}
     save_index([r for r in recs if id(r) not in drop], stamp)
     print("書いた。検索に反映: papers index")
 
@@ -1733,10 +1750,14 @@ def info():
     recs = load_index()[0]
     im = os.path.getmtime(INDEX)
     dm = os.path.getmtime(DB) if os.path.exists(DB) else None
-    dn = None
+    dn = df = None
     if dm:
         c = sqlite3.connect(DB)
         dn = c.execute("SELECT count(*) FROM p").fetchone()[0]
+        try:
+            df = int(c.execute("SELECT v FROM meta WHERE k='fulltext'").fetchone()[0])
+        except (sqlite3.Error, TypeError, ValueError):       # 全頁の本文を入れる前の作り方の索引
+            pass
         c.close()
     newest = lambda pat: max(glob.glob(os.path.join(ROOT, pat)), key=os.path.getmtime, default=None)
     ren, bk = newest("renames-*.jsonl"), newest("backups/papers-*.jsonl")
@@ -1744,7 +1765,7 @@ def info():
          "index": INDEX, "index_updated": fmt(im), "index_bytes": os.path.getsize(INDEX), "records": len(recs),
          "resolved": sum(1 for r in recs if renamable(r) and not moved_aside(r)),
          "needs_human": sum(1 for r in recs if needs_human(r)), "moved_aside": sum(1 for r in recs if moved_aside(r)),
-         "db": DB if dm else None, "db_updated": fmt(dm), "db_bytes": os.path.getsize(DB) if dm else None, "db_records": dn,
+         "db": DB if dm else None, "db_updated": fmt(dm), "db_bytes": os.path.getsize(DB) if dm else None, "db_records": dn, "db_fulltext": df,
          "db_stale": bool(dm is None or dm < im or dn != len(recs) or not _db_format_ok()),
          "missing_files": sum(1 for r in recs if not os.path.exists(r["path"])),
          "last_rename": fmt(os.path.getmtime(ren)) if ren else None, "last_backup": bk}
@@ -1755,8 +1776,10 @@ def info():
     mb = lambda b: "%.1f MB" % (b / 1e6) if b else "-"
     print("索引          %s\n              更新 %s ・ %s ・ %d 件（解決済み %d ・ 人手行き %d ・ 重複として移した %d）"
           % (d["index"], d["index_updated"], mb(d["index_bytes"]), d["records"], d["resolved"], d["needs_human"], d["moved_aside"]))
-    print("検索の索引    %s\n              更新 %s ・ %s ・ %s 件" % (d["db"] or "(無い)", d["db_updated"] or "-", mb(d["db_bytes"]),
-                                                   d["db_records"] or 0))
+    print("検索の索引    %s\n              更新 %s ・ %s ・ %s 件(全頁の本文あり %s 件)"
+          % (d["db"] or "(無い)", d["db_updated"] or "-", mb(d["db_bytes"]), d["db_records"] or 0, d["db_fulltext"] or 0))
+    if d["db_records"] and (d["db_fulltext"] or 0) < d["db_records"] - d["missing_files"]:
+        print("              note: some records have no full text yet (they are searchable by their first 3,000 characters). Read it with: papers fulltext")
     if d["db_stale"]:
         print("              ※ 索引より古い(または件数・作り方が違う)。検索に反映するには: papers index")
     if d["missing_files"]:
@@ -1834,6 +1857,16 @@ NONPAPER_PAGES = 50
 # 種類 → (確認用ページのキー, 移す先のフォルダ)。paper は「論文として残す」: 移さず、候補に出さなくなるだけ
 KINDS = {"book": ("b", "本・ハンドブック"), "thesis": ("t", "学位論文"), "lecture": ("l", "講義ノート・スライド"),
          "document": ("d", "報告書・マニュアル・資料"), "patent": ("a", "特許"), "paper": ("p", None)}
+
+
+KIND_GROUPS = ("paper", "book", "other")
+
+
+def kind_group(r):
+    """検索の種類の絞り込み(--kind)での分け方: 論文以外の印が無ければ paper、本・ハンドブックは book、ほかの論文以外は other。"""
+    if not r.get("not_paper"):
+        return "paper"
+    return "book" if r.get("kind") == "book" else "other"
 
 
 def _pages_in(info):
@@ -2322,16 +2355,244 @@ def dedup():
 
 
 # ---------- search: FTS5(trigram) + 文ベクトル ----------
+# ---- 全頁の本文(検索専用) ----
+# 同定に使う text(先頭 3,000 字)は papers.jsonl にある。全頁の本文は大きい(3,176 件で約 140 MB)ので索引には入れず、ここに置く。
+# 鍵はファイルの中身から作る(パスを鍵にすると、改名・移動のたびに読み直しになる)。消してもよい: papers fulltext が作り直す。
+FULLTEXT = os.path.join(ROOT, "fulltext")
+FULLTEXT_V = 1
+THIN_CHARS = 200            # 1 頁あたりの平均がこれ未満のファイルは、テキスト層が乏しいとみなして全頁を OCR する
+PDFTOTEXT_TIMEOUT = 30      # 全頁の読み取りの時間切れ(秒)。超えたら PDFKit(ptext.swift)で読む。実測の最大は 2.7 秒(1 件だけ 97 秒)
+OCR_CHUNK = 8               # 一度に画像にする頁数(全頁を一度に画像にすると、数百頁の本で一時ファイルが大きくなる)
+
+
+def _file_key(path):
+    """全頁の本文の鍵。ファイルの大きさと、先頭・末尾の 64 KB から作る。読めなければ None。
+    中身が同じファイル(別のフォルダの写し)は同じ鍵になり、本文を共有する。"""
+    try:
+        n = os.path.getsize(path)
+        with open(path, "rb") as f:
+            head = f.read(65536)
+            f.seek(max(0, n - 65536))
+            tail = f.read(65536)
+    except OSError:
+        return None
+    return hashlib.sha1(b"%d\0" % n + head + tail).hexdigest()
+
+
+def _fulltext_path(key):
+    return os.path.join(FULLTEXT, key[:2], key + ".json")
+
+
+def _fulltext_load(key):
+    """鍵の本文 {"how": 読み方, "pages": [頁の本文…], "thin": OCR 待ち}。無い・読めない・版が違えば None(読み直す)。"""
+    try:
+        e = json.load(open(_fulltext_path(key)))
+    except (OSError, ValueError):
+        return None
+    return e if isinstance(e, dict) and e.get("v") == FULLTEXT_V and isinstance(e.get("pages"), list) else None
+
+
+def _fulltext_save(key, how, pages, thin):
+    os.makedirs(os.path.dirname(_fulltext_path(key)), exist_ok=True)
+    _atomic_write(_fulltext_path(key), [json.dumps({"v": FULLTEXT_V, "how": how, "pages": pages, "thin": thin}, ensure_ascii=False)])
+
+
+def _split_pages(t):
+    """pdftotext の出力を頁に分ける(改頁が頁の終わり。最後の空の片は頁ではない)。頁ごとに空白の並びを 1 つにする。"""
+    pages = t.split("\f")
+    if pages and not pages[-1].strip():
+        pages.pop()
+    return [" ".join(p.split()) for p in pages]
+
+
+def _thin(pages):
+    """テキスト層が乏しい(スキャン)。1 頁あたりの平均で見る: 図だけの頁・白紙が混ざる PDF を OCR に回さない。"""
+    return sum(map(len, pages)) < THIN_CHARS * len(pages)
+
+
+def _ptext():
+    """ptext.swift(PDFKit で全頁の本文を読む)を必要になった時だけビルドする。swiftc が無ければ None。"""
+    exe, src = os.path.join(ROOT, "ptext"), os.path.join(ROOT, "ptext.swift")
+    try:
+        if not os.path.exists(exe) or os.path.getmtime(src) > os.path.getmtime(exe):
+            subprocess.run(["swiftc", "-O", "-o", exe, src], capture_output=True, timeout=300)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return exe if os.path.exists(exe) else None
+
+
+def _run_text(cmd, timeout):
+    """(標準出力, 失敗の理由)。成功なら理由は None。sh() と違い、時間切れ・失敗を空の本文と区別する。"""
+    try:
+        p = subprocess.run(cmd, capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return "", "timed out after %d s" % timeout
+    except OSError as e:
+        return "", str(e)
+    return p.stdout.decode("utf-8", "replace"), None if p.returncode == 0 else "exit status %d" % p.returncode
+
+
+def _text_layer(path):
+    """全頁のテキスト層を (頁の並び, 読み方) で返す。pdftotext が時間切れ・失敗なら PDFKit で読む。
+    どちらも読めなければ ([], 理由)。頁が 1 つも無い出力は読めなかった扱い(空の本文として置かない)。"""
+    out, why = _run_text(["pdftotext", path, "-"], PDFTOTEXT_TIMEOUT)
+    if why is None and _split_pages(out):
+        return _split_pages(out), "pdftotext"
+    why = "pdftotext: %s" % (why or "no pages")
+    exe = _ptext()
+    if exe:
+        out, why2 = _run_text([exe, path], 120)
+        if why2 is None and _split_pages(out):
+            return _split_pages(out), "pdfkit"
+        why += "; pdfkit: %s" % (why2 or "no pages")
+    return [], why
+
+
+def _ocr_pages(path, first, last):
+    """first〜last 頁を OCR して {頁番号: 本文}。画像にできなかった頁は入らない。"""
+    import tempfile, glob as _g
+    d = tempfile.mkdtemp()
+    sh(["pdftoppm", "-f", str(first), "-l", str(last), "-r", "200", "-png", path, os.path.join(d, "p")], timeout=300)
+    out = {}
+    for png in sorted(_g.glob(os.path.join(d, "p*.png"))):
+        exe = _vocr()
+        out[int(re.search(r'(\d+)\.png$', png).group(1))] = " ".join(
+            sh([exe, png, OCR_LANG] if exe else ["tesseract", png, "stdout"], timeout=180).split())
+        os.remove(png)
+    os.rmdir(d)
+    return out
+
+
+def _ocr_all(path, n):
+    """n 頁のファイルの全頁を OCR して、(頁の並び(長さ n), 画像にできた頁の数)で返す。画像にできなかった頁は空。"""
+    got = {}
+    for first in range(1, n + 1, OCR_CHUNK):
+        got.update(_ocr_pages(path, first, min(n, first + OCR_CHUNK - 1)))
+    return [got.get(i, "") for i in range(1, n + 1)], sum(1 for i in range(1, n + 1) if i in got)
+
+
+def fulltext_fill(recs, do_ocr=True):
+    """全頁の本文がまだ無いファイルを読んで fulltext/ に置く。papers.jsonl は書かない。
+    テキスト層が乏しいファイルは、do_ocr なら全頁を OCR する(しなければ OCR 待ちの印を付けて、次の機会に回す)。
+    読めなかったファイルは置かない(次に呼ばれたときにまた読む)。返り値は件数の辞書と、読めなかった [(パス, 理由)]。"""
+    from concurrent.futures import ThreadPoolExecutor
+    todo, wait = {}, {}
+    for r in recs:
+        k = _file_key(r["path"])
+        if not k:                                  # ファイルが無い・開けない(papers info が件数を出す)
+            continue
+        e = _fulltext_load(k)
+        if e is None:
+            todo.setdefault(k, r["path"])
+        elif e.get("thin"):
+            wait.setdefault(k, (r["path"], e))
+    got = {"read": 0, "ocr": 0, "ocr_pages": 0, "pending": 0}
+    failed = []
+    if todo:
+        _ptext()                                   # 並列に呼ぶ前に 1 度だけビルドする
+    with ThreadPoolExecutor(8) as ex:
+        for i, (k, (pages, how)) in enumerate(zip(todo, ex.map(_text_layer, todo.values()))):
+            if i % 200 == 0 and len(todo) > 200:
+                print("  全頁の本文 %d/%d" % (i, len(todo)), file=sys.stderr)
+            if not pages:
+                failed.append((todo[k], how))
+                continue
+            _fulltext_save(k, how, pages, _thin(pages))
+            got["read"] += 1
+            if _thin(pages):
+                wait[k] = (todo[k], {"how": how, "pages": pages})
+    if not do_ocr:
+        got["pending"] = len(wait)
+        return got, failed
+    if wait:
+        _vocr()                                    # 並列に呼ぶ前に 1 度だけビルドする
+        print("  OCR: %d 件・%d 頁(1 頁 1 秒ほど)" % (len(wait), sum(len(e["pages"]) for _, e in wait.values())), file=sys.stderr)
+
+    def one(item):
+        path, e = item
+        return _ocr_all(path, len(e["pages"]))
+    with ThreadPoolExecutor(4) as ex:
+        for i, (k, (pages, done)) in enumerate(zip(wait, ex.map(one, wait.values()))):
+            path, e = wait[k]
+            if done < len(pages):                  # 画像にできなかった頁がある(pdftoppm の失敗・時間切れ)。待ちの印を残し、次にまた OCR する
+                failed.append((path, "ocr: rendered %d of %d pages" % (done, len(pages))))
+                got["pending"] += 1
+                continue
+            # 頁ごとに、字の多いほうを採る(テキスト層のある頁が混ざるファイルで、その頁の本文を OCR で減らさない)
+            best = [o if len(o) > len(t) else t for o, t in zip(pages, e["pages"])]
+            used = sum(1 for o, t in zip(pages, e["pages"]) if len(o) > len(t))
+            _fulltext_save(k, "ocr" if used else e["how"], best, False)   # 1 頁も増えない(白紙・図だけ)なら、待ちの印だけ外す
+            if used:
+                got["ocr"], got["ocr_pages"] = got["ocr"] + 1, got["ocr_pages"] + used
+            if i % 10 == 0:
+                print("  OCR %d/%d" % (i, len(wait)), file=sys.stderr)
+    return got, failed
+
+
+def fulltext_report(got, failed):
+    print("全頁の本文: 新しく読んだ %d 件%s%s" % (got["read"],
+          "、うち OCR %d 件・%d 頁" % (got["ocr"], got["ocr_pages"]) if got["ocr"] else "",
+          "、OCR 待ち %d 件(papers fulltext)" % got["pending"] if got["pending"] else ""))
+    if failed:
+        print("note: could not read or OCR the full text of %d file(s); they stay searchable by what was read so far"
+              % len(failed), file=sys.stderr)
+        for path, why in failed[:10]:
+            print("  %s (%s)" % (path, why), file=sys.stderr)
+
+
+def fulltext():
+    """papers fulltext [--no-ocr]。全頁の本文を読んで fulltext/ に置き、検索の索引を作り直す(検索専用。papers.jsonl は書かない)。
+    まだ読んでいないファイルだけを読む。テキスト層の乏しい PDF(スキャン)は全頁を OCR する(1 頁 1 秒ほど)。
+    --no-ocr なら OCR を後回しにする(次に --no-ocr なしで呼んだときに OCR する)。"""
+    got, failed = fulltext_fill(load_index()[0], "--no-ocr" not in sys.argv)
+    fulltext_report(got, failed)
+    build_db().close()
+
+
+def fulltext_of(recs, prev=lambda: {}):
+    """記録ごとの、検索の索引に入れる全頁の本文(頁ごとに索引と同じ正規化をかけ、頁の間に改頁)。まだ読んでいなければ空。
+    ファイルが開けない記録(置き場が見えない・同期待ち)は鍵が作れないので、prev() = 前の検索の索引の {パス: 本文} から引き継ぐ
+    (引き継がないと、置き場が見えないときの作り直しで、全頁の本文が黙って消える)。"""
+    out, old = [], None
+    for r in recs:
+        k = _file_key(r["path"])
+        if k is None:
+            old = prev() if old is None else old
+            out.append(old.get(r["path"], ""))
+            continue
+        e = _fulltext_load(k)
+        out.append("\f".join(_norm_text(p) for p in e["pages"]) if e else "")
+    return out
+
+
+def _prev_fulltext():
+    """今の検索の索引の {パス: 全頁の本文}。無い・作り方が違う・読めないなら空。"""
+    if not _db_format_ok():
+        return {}
+    try:
+        c = sqlite3.connect(DB)
+        out = dict(c.execute("SELECT path, fulltext FROM f WHERE fulltext != ''"))
+        c.close()
+        return out
+    except sqlite3.Error:
+        return {}
+
+
 # papers.jsonl からの純粋な派生。古ければ search が黙って作り直す。
 DB = os.path.join(ROOT, "papers.db")
 COLS = ["path", "year", "doi", "first_author", "title", "authors",
         "journal", "folder", "abstract", "text"]
 # bm25 は全列に重みが要る(UNINDEXED 列の分も)。text はページ1なのでタイトルを再掲する → 低く。
 W = [0, 0, 8, 6, 10, 6, 4, 2, 3, 1]
+# 全頁の本文は別の表 f に入れる(p の列 + fulltext)。順位は「p で当たる記録を p の順位で先に、f でだけ当たる記録をその後ろに」。
+# 1 つの表にすると、文書の長さが bm25 に入って今の順位が変わる(8 語句の上位 10 件で、同じ記録が 47/80。DESIGN.md「全文の索引」)。
+FCOLS = COLS + ["fulltext"]
+WF = W + [0.3]              # f でだけ当たる記録どうしの並びに使う
 # 検索の索引の作り方の版。build_db の作る中身(トークナイザ・正規化・列)を変えたら上げる。古い版の papers.db は作り直す。
 # 2: 文字列を NFKC にし、アクセントを畳む(remove_diacritics)
 # 3: 字の間に離れて載るアクセント記号を落とす。本文・抄録・表題の仮名・漢字の間の空白を詰める。著者の欄の両端に空白を足す
-DB_FORMAT = "3"
+# 4: 全頁の本文の表 f を足す
+DB_FORMAT = "4"
 # アクセントを畳む trigram を知らない古い SQLite では、畳まない trigram で作る(Müller と Muller は別の語のまま)
 TOKENIZERS = ["trigram remove_diacritics 1", "trigram"]
 
@@ -2375,7 +2636,7 @@ def _squash_quoted(q):
     def one(m):
         col, body = m.group(1) or "", m.group(2)
         sq = _CJK_GAP.sub("", body)
-        if sq == body or (col and col not in ("title:", "abstract:", "text:")):
+        if sq == body or (col and col not in ("title:", "abstract:", "text:", "fulltext:")):
             return m.group(0)
         return '%s"%s"' % (col, sq) if col else '("%s" OR "%s")' % (body, sq)
     return _QUOTED.sub(one, q)
@@ -2398,41 +2659,64 @@ def _embed(texts):
     return vs
 
 
-def build_db():
-    import array
-    recs = [json.loads(l) for l in open(INDEX) if l.strip()]
-    if os.path.exists(DB):
-        os.remove(DB)
-    c = sqlite3.connect(DB)
+def _fts_table(c, name, cols):
+    """FTS5 の表を作る。この SQLite が知らないトークナイザなら次の候補で作る(最後の候補でも駄目ならそのまま落とす)。"""
     for i, tok in enumerate(TOKENIZERS):
         try:
-            c.execute("CREATE VIRTUAL TABLE p USING fts5(%s, tokenize='%s')" %
-                      (", ".join(x + " UNINDEXED" if x in ("path", "year") else x for x in COLS), tok))
-            break
-        except sqlite3.OperationalError:           # この SQLite が知らないトークナイザ。最後の候補でも駄目ならそのまま落とす
+            c.execute("CREATE VIRTUAL TABLE %s USING fts5(%s, tokenize='%s')" %
+                      (name, ", ".join(x + " UNINDEXED" if x in ("path", "year") else x for x in cols), tok))
+            return
+        except sqlite3.OperationalError:
             if i == len(TOKENIZERS) - 1:
                 raise
             print("note: this SQLite (%s) does not support tokenizer '%s'; using '%s'"
                   % (sqlite3.sqlite_version, tok, TOKENIZERS[i + 1]), file=sys.stderr)
-    # path と year は照合に使わないのでそのまま(path は索引の記録を引く鍵)。ほかは検索語と同じ正規化をかける
-    c.executemany("INSERT INTO p VALUES (%s)" % ",".join("?" * len(COLS)),
-                  [[r.get("path") or "", str(r.get("year") or ""), _norm(r.get("doi")), _pad(r.get("first_author")),
-                    _norm_text(r.get("title")), _pad(" ".join(r.get("authors") or [])), _norm(r.get("journal")),
-                    _norm(r.get("folder")), _norm_text(r.get("abstract")), _norm_text(r.get("text"))] for r in recs])
-    # ベクトルはタイトルのみ。抄録を足すと平均で薄まり精度が落ちる(§10 の測定)。
-    c.execute("CREATE TABLE v (path TEXT PRIMARY KEY, vec BLOB)")
-    titles = [r.get("title") or (r.get("title_guess") or "")[:120] for r in recs]
-    for r, v in zip(recs, _embed(titles)):
-        if v:
-            c.execute("INSERT OR REPLACE INTO v VALUES (?,?)",
-                      (r["path"], array.array("f", v).tobytes()))
-    c.execute("CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT)")
-    c.execute("INSERT INTO meta VALUES ('mtime',?)", (str(os.path.getmtime(INDEX)),))
-    c.execute("INSERT INTO meta VALUES ('format',?)", (DB_FORMAT,))
-    c.commit()
-    print("papers.db: %d 件 (ベクトル %d)" %
-          (len(recs), c.execute("SELECT count(*) FROM v").fetchone()[0]), file=sys.stderr)
-    return c
+
+
+def build_db():
+    """検索の索引を作り直す。別の名前で作り、できあがってから置き換える(途中で止まっても、前の索引が残る)。"""
+    import array, glob
+    recs = [json.loads(l) for l in open(INDEX) if l.strip()]
+    for old in glob.glob(glob.escape(DB) + ".*.part*"):      # 前に途中で止まった作りかけ(1 時間より古いものだけ。今作っている最中かもしれない)
+        try:
+            if time.time() - os.path.getmtime(old) > 3600:
+                os.remove(old)
+        except OSError:                                      # 見ている間に、作っていた側が片付けた
+            pass
+    tmp = "%s.%d.part" % (DB, os.getpid())
+    if os.path.exists(tmp):
+        os.remove(tmp)
+    try:
+        c = sqlite3.connect(tmp)
+        _fts_table(c, "p", COLS)
+        _fts_table(c, "f", FCOLS)
+        # path と year は照合に使わないのでそのまま(path は索引の記録を引く鍵)。ほかは検索語と同じ正規化をかける
+        rows = [[r.get("path") or "", str(r.get("year") or ""), _norm(r.get("doi")), _pad(r.get("first_author")),
+                 _norm_text(r.get("title")), _pad(" ".join(r.get("authors") or [])), _norm(r.get("journal")),
+                 _norm(r.get("folder")), _norm_text(r.get("abstract")), _norm_text(r.get("text"))] for r in recs]
+        full = fulltext_of(recs, _prev_fulltext)
+        c.executemany("INSERT INTO p VALUES (%s)" % ",".join("?" * len(COLS)), rows)
+        c.executemany("INSERT INTO f VALUES (%s)" % ",".join("?" * len(FCOLS)), [row + [t] for row, t in zip(rows, full)])
+        # ベクトルはタイトルのみ。抄録を足すと平均で薄まり精度が落ちる(§10 の測定)。
+        c.execute("CREATE TABLE v (path TEXT PRIMARY KEY, vec BLOB)")
+        titles = [r.get("title") or (r.get("title_guess") or "")[:120] for r in recs]
+        for r, v in zip(recs, _embed(titles)):
+            if v:
+                c.execute("INSERT OR REPLACE INTO v VALUES (?,?)",
+                          (r["path"], array.array("f", v).tobytes()))
+        c.execute("CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT)")
+        c.execute("INSERT INTO meta VALUES ('mtime',?)", (str(os.path.getmtime(INDEX)),))
+        c.execute("INSERT INTO meta VALUES ('format',?)", (DB_FORMAT,))
+        c.execute("INSERT INTO meta VALUES ('fulltext',?)", (str(sum(1 for t in full if t)),))
+        c.commit()
+        nv = c.execute("SELECT count(*) FROM v").fetchone()[0]
+        c.close()
+        os.replace(tmp, DB)
+    finally:
+        for left in glob.glob(glob.escape(tmp) + "*"):       # 途中で止まった作りかけと、その journal
+            os.remove(left)
+    print("papers.db: %d 件 (ベクトル %d、全頁の本文 %d)" % (len(recs), nv, sum(1 for t in full if t)), file=sys.stderr)
+    return sqlite3.connect(DB)
 
 
 def _db_format_ok():
@@ -2463,7 +2747,8 @@ def _db():
     return c
 
 
-SEARCH_COLS = ("title", "first_author", "authors", "journal", "doi", "abstract", "folder", "text")
+SEARCH_COLS = ("title", "first_author", "authors", "journal", "doi", "abstract", "folder", "text", "fulltext")
+_FULL_COL = re.compile(r'\bfulltext\s*:')        # 表 p には無い列。この列を名指しした式は f だけで引く
 _OPS = re.compile(r'\b(AND|OR|NOT)\b|["()]|\b(author|%s):' % "|".join(SEARCH_COLS))
 
 
@@ -2494,29 +2779,57 @@ def _unused_terms(q):
     return [t for t in _RUN.findall(_norm(q)) if len(t) < 3]
 
 
-def _like(q):
-    """3 文字以上の語が無い入力(trigram が索引できない)を、表題と本文の部分一致で探す SQL と引数。
-    空白で分けた語のどれかを含む記録を、含む語の多い順に返す。% と _ は文字として探す。"""
+def _like_hits(q):
+    """3 文字以上の語が無い入力の、部分一致の数え方。(表題・先頭の本文で当たる語の数の式, 全頁の本文も入れた式, 式 1 つ分の引数の組)。
+    % と _ は文字として探す。"""
     pats = ["%" + re.sub(r'([\\%_])', r'\\\1', t) + "%" for t in _norm(q).split()]
-    hit = " + ".join(["(title LIKE ? ESCAPE '\\' OR text LIKE ? ESCAPE '\\')"] * len(pats)) or "0"
-    return ("SELECT path FROM p WHERE %s > 0 ORDER BY %s DESC, rowid LIMIT ?" % (hit, hit),
-            [p for p in pats for _ in range(2)] * 2)
+    one = lambda cols: " + ".join(["(" + " OR ".join("%s LIKE ? ESCAPE '\\'" % x for x in cols) + ")"] * len(pats)) or "0"
+    return one(("title", "text")), one(("title", "text", "fulltext")), (lambda k: [p for p in pats for _ in range(k)])
 
 
-def _visible(paths, hidden, n, show_all=False):
-    """検索結果から、dedup が移した重複(利用者が消す予定のもの)を外して n 件に。--all なら外さない。"""
-    return (paths if show_all else [p for p in paths if p not in hidden])[:n]
+def _like(q):
+    """3 文字以上の語が無い入力(trigram が索引できない)を、表題と本文(先頭と全頁)の部分一致で探す SQL と引数。
+    空白で分けた語のどれかを含む記録を返す。表題・先頭の本文で当たる記録が、含む語の多い順に先(全頁の本文を入れる前と同じ並び)。
+    全頁の本文でだけ当たる記録はその後ろに、含む語の多い順。"""
+    near, anywhere, args = _like_hits(q)
+    return ("SELECT path FROM f WHERE %s > 0 ORDER BY (%s) > 0 DESC, CASE WHEN (%s) > 0 THEN %s ELSE %s END DESC, rowid LIMIT ?"
+            % (anywhere, near, near, near, anywhere), args(3) + args(2) * 3 + args(3))
 
 
-def _fts(c, q, n):
+def _visible(paths, hidden, n):
+    """検索結果から hidden(dedup が移した重複 = 利用者が消す予定のもの、--kind に合わない種類)を外して n 件に。"""
+    return [p for p in paths if p not in hidden][:n]
+
+
+def _only_full(c, q, path):
+    """この記録が、全頁の本文を入れて初めて式に当たるか(表題・著者・抄録・先頭の本文だけでは当たらない)。
+    fulltext: を名指しした式は表 p で評価できないので、印を付けない(どの記録も偽)。"""
+    m = _match(q)
+    if not m:
+        near, anywhere, args = _like_hits(q)
+        r = c.execute("SELECT (%s) > 0, (%s) > 0 FROM f WHERE path=?" % (near, anywhere), args(2) + args(3) + [path]).fetchone()
+        return bool(r) and not r[0] and bool(r[1])
+    if _FULL_COL.search(m):
+        return False
+    return (not c.execute("SELECT 1 FROM p WHERE p MATCH ? AND path=?", (m, path)).fetchone()
+            and bool(c.execute("SELECT 1 FROM f WHERE f MATCH ? AND path=?", (m, path)).fetchone()))
+
+
+def _fts(c, q, n, full=True):
+    """順位つきの検索。表 p(表題・著者・抄録・先頭の本文など)で当たる記録を p の順位で先に並べ、n 件に届かなければ、
+    全頁の本文を入れた表 f でだけ当たる記録を後ろに足す。full=False なら p だけ(hybrid。全頁の本文を入れる前と同じ)。"""
     m = _match(q)
     if not m:                                  # 2文字以下(trigram が索引できない)
         sql, args = _like(q)
         return [r[0] for r in c.execute(sql, args + [n]).fetchall()]
-    w = ",".join(str(x) for x in W)
-    rows = c.execute("SELECT path FROM p WHERE p MATCH ? ORDER BY bm25(p,%s) LIMIT ?" % w,
-                     (m, n)).fetchall()         # bm25 は昇順(小さいほど良い)
-    return [r[0] for r in rows]
+    ranked = lambda t, w, k: [r[0] for r in c.execute("SELECT path FROM %s WHERE %s MATCH ? ORDER BY bm25(%s,%s) LIMIT ?"
+                                                    % (t, t, t, ",".join(str(x) for x in w)), (m, k))]   # bm25 は昇順(小さいほど良い)
+    first = [] if _FULL_COL.search(m) else ranked("p", W, n)
+    if len(first) >= n or not full:
+        return first
+    # p で当たる記録は first に全部ある(n 件に届いていない)。全頁の本文でだけ当たる記録を、その後ろに並べる
+    seen = set(first)
+    return first + [p for p in ranked("f", WF, n + len(first)) if p not in seen][:n - len(first)]
 
 
 def _vec(c, q, n):
@@ -2555,9 +2868,12 @@ def _listing(i, row, p):
 
 
 def search():
-    """papers search <語> [--n=10] [--full | --json [--with-text]] [--all]
-    語は OR・部分一致。AND・OR・NOT(大文字)、"語句"、括弧、列名:(title・author・first_author・journal・doi・abstract・folder・text)
+    """papers search <語> [--n=10] [--kind=paper|book|other] [--full | --json [--with-text]] [--all]
+    語は OR・部分一致。AND・OR・NOT(大文字)、"語句"、括弧、列名:(title・author・first_author・journal・doi・abstract・folder・text・fulltext)
     を書けば、その式で絞る。--all で dedup が移した重複も出す。
+    - 表題・著者・誌名・抄録・本文の先頭(text)で当たる記録が先に並び、全頁の本文(fulltext)を入れて初めて当たる記録はその後ろに並ぶ
+      (fulltext: を名指しした式は、全部が全頁の本文を入れた順位で並び、境目は出ない)
+    - --kind で種類を絞る: paper(論文)・book(本・ハンドブック)・other(学位論文・講義ノート・資料・特許)。コンマで複数。既定は全部
     - 記号でつながる語は引用符で囲む(そのままだと記号で切れる): papers search '"X-ray"'   '"FT-IR" OR "FTIR"'
     - 2 文字以下の語を語として引くには、前後の空白や記号ごと囲む: papers search '" Si "'   '" Si-"'   '"(Si)"'
       (囲まない Si は basis のような語の一部にも当たる)
@@ -2572,15 +2888,21 @@ def search():
               % ", ".join(_short_terms(q)), file=sys.stderr)
     if _unused_terms(q):
         print("note: terms shorter than 3 characters were not used: %s" % ", ".join(_unused_terms(q)), file=sys.stderr)
-    hidden = {r["path"] for r in map(json.loads, open(INDEX)) if moved_aside(r)}
-    k = n if "--all" in sys.argv else n + len(hidden)          # 外す分を見込んで多めに引く
+    kinds = next((a.split("=")[1].split(",") for a in sys.argv if a.startswith("--kind=")), None)
+    if kinds and not set(kinds) <= set(KIND_GROUPS):
+        sys.exit("unknown --kind value: %s (use %s; separate several with commas)"
+                 % (", ".join(sorted(set(kinds) - set(KIND_GROUPS))), ", ".join(KIND_GROUPS)))
+    # 結果から外す記録: dedup が移した重複(--all なら外さない)と、--kind に合わない種類
+    hidden = {r["path"] for r in map(json.loads, open(INDEX))
+              if (moved_aside(r) and "--all" not in sys.argv) or (kinds and kind_group(r) not in kinds)}
+    k = n + len(hidden)                                        # 外す分を見込んで多めに引く
     c = _db()
     try:
         if mode == "vec":
             paths = _vec(c, q, k)
         elif mode == "hybrid":
             rank = collections.defaultdict(float)
-            for lst in (_fts(c, q, k * 3), _vec(c, q, k * 3)):
+            for lst in (_fts(c, q, k * 3, full=False), _vec(c, q, k * 3)):
                 for i, p in enumerate(lst):
                     rank[p] += 1.0 / (60 + i)      # RRF
             paths = [p for p, _ in sorted(rank.items(), key=lambda kv: -kv[1])[:k]]
@@ -2590,23 +2912,34 @@ def search():
         sys.exit("invalid search expression (%s).\n"
                  "- write AND, OR, NOT in capitals; NOT needs a term before it (laser NOT review)\n"
                  "- quote terms that contain hyphens or symbols (\"second-harmonic\")\n"
-                 "- columns: title, author, first_author, journal, doi, abstract, folder, text" % e)
-    paths = _visible(paths, hidden, n, "--all" in sys.argv)
+                 "- columns: title, author, first_author, journal, doi, abstract, folder, text, fulltext" % e)
+    paths = _visible(paths, hidden, n)
     if "--json" in sys.argv or "--full" in sys.argv:
         idx = {r["path"]: r for r in map(json.loads, open(INDEX)) if r.get("path")}
         for i, p in enumerate((p for p in paths if p in idx), 1):
-            print(json.dumps(compact(idx[p], "--with-text" in sys.argv), ensure_ascii=False) if "--json" in sys.argv
-                  else _full_entry(i, idx[p]))
+            only = mode == "fts" and _only_full(c, q, p)
+            if "--json" in sys.argv:
+                print(json.dumps(dict(compact(idx[p], "--with-text" in sys.argv), **({"matched": "fulltext"} if only else {})),
+                                 ensure_ascii=False))
+            else:
+                print(_full_entry(i, idx[p]) + ("    (matches only when the full text is searched)\n" if only else ""))
         return
     m = _match(q)
+    marked = False
     for i, p in enumerate(paths, 1):
         row = c.execute("SELECT year, first_author, journal, title FROM p WHERE path=?",
                         (p,)).fetchone() or ("", "", "", "")
+        only = mode == "fts" and _only_full(c, q, p)
         sn = ""
         if m:
-            r = c.execute("SELECT snippet(p,%d,'[',']','…',10) FROM p " % COLS.index("text") +
-                          "WHERE p MATCH ? AND path=?", (m, p)).fetchone()
-            sn = (r[0] if r else "").replace("\n", " ")[:110]
+            t, cols = ("f", FCOLS) if only or _FULL_COL.search(m) else ("p", COLS)      # 抜粋は、当たった側の本文から
+            r = c.execute("SELECT snippet(%s,%d,'[',']','…',10) FROM %s WHERE %s MATCH ? AND path=?"
+                          % (t, len(cols) - 1, t, t), (m, p)).fetchone()
+            sn = (r[0] if r else "").replace("\n", " ").replace("\f", " ")[:110]
+        if only and not marked:                    # ここから後ろは全部そう(_fts・_like の並べ方)
+            print("    -- the records below match only when the full text is searched "
+                  "(not by title, authors, abstract and the first 3,000 characters alone) --")
+            marked = True
         print(_listing(i, row, p))
         print("    %s" % p)
         if sn:
@@ -2881,15 +3214,28 @@ def selftest():
     assert _unused_terms("Si Ge") == [] and _unused_terms("title:laser AND CW") == [], "LIKE の経路・演算子の式で注意を出している"
     # 3 文字以上の語が無い入力: % と _ は文字として、語ごとに探し、含む語の多い順
     lk = sqlite3.connect(":memory:")
-    lk.execute("CREATE TABLE p (path, title, text)")
-    lk.executemany("INSERT INTO p VALUES (?,?,?)", [("a", "T_c of films", ""), ("b", "", "Tc and T1c"), ("c", "", "50% yield"),
-                                                    ("d", "", "500 samples"), ("e", "", "制御のみ"), ("f", "発振", "発振と制御"),
-                                                    ("g", "", "ガス"), ("h", "Si", "")])
+    lk.execute("CREATE TABLE f (path, title, text, fulltext)")
+    lk.executemany("INSERT INTO f VALUES (?,?,?,?)", [("a", "T_c of films", "", ""), ("b", "", "Tc and T1c", ""), ("c", "", "50% yield", ""),
+                                                      ("d", "", "500 samples", ""), ("e", "", "制御のみ", ""), ("f", "発振", "発振と制御", ""),
+                                                      ("g", "", "ガス", ""), ("h", "Si", "", ""), ("i", "", "", "奥の頁に整合"),
+                                                      ("j", "整合の条件", "", "")])
     like = lambda q: [r[0] for r in lk.execute(_like(q)[0], _like(q)[1] + [10])]
     assert like("T_c") == ["a"] and like("50%") == ["c"], "LIKE の % と _ がワイルドカードのまま"
     assert like("発振 制御") == ["f", "e"], "語ごとに分けていない、または含む語の多い順でない"
     assert like("制御") == ["e", "f"] and like("%") == ["c"]
     assert like("カ\u3099ス") == ["g"] and like("Ｓｉ") == ["h"], "分解形・全角の入力を索引と同じ形にしていない"
+    assert like("整合") == ["j", "i"], "3 文字以上の語が無い入力が全頁の本文を見ていない、または表題・先頭で当たる記録を先に並べていない"
+    assert like("整合 奥") == ["j", "i"], "全頁の本文でだけ当たる記録を、含む語が多いからと、表題で当たる記録より前に並べた"
+    assert _match('fulltext:"第二 高調波"') == 'fulltext:"第二高調波"', "fulltext: の句の、仮名・漢字の間の空白を詰めていない"
+    # 全頁の本文: 頁の分け方、テキスト層が乏しいかの判定、検索の種類の分け方
+    assert _split_pages("a  b\n c\f\fd\f") == ["a b c", "", "d"] and _split_pages("") == [] and _split_pages("x") == ["x"], \
+        "改頁で頁に分けていない・最後の空の片を頁に数えている・途中の空の頁を落としている"
+    assert _thin(["", "x" * (THIN_CHARS - 1)]) and not _thin(["", "x" * THIN_CHARS * 2]) and not _thin([]), \
+        "テキスト層が乏しいかを、頁あたりの平均で見ていない"
+    assert [kind_group(r) for r in ({}, {"kind": "paper"}, {"not_paper": "user", "kind": "book"}, {"not_paper": "user", "kind": "thesis"},
+                                    {"not_paper": "user"})] == ["paper", "paper", "book", "other", "other"], "検索の種類の分け方"
+    assert _FULL_COL.search(_match("fulltext:laser AND title:fiber")) and not _FULL_COL.search(_match("text:laser")), \
+        "fulltext: を名指しした式を見分けていない"
     # 索引に入れる本文: 仮名・漢字の間の空白(行の折り返しの跡)を詰める。英字の間・英字と和文の間は詰めない。検索語にはかけない
     assert _norm_text("スペク トル解析 と 干渉  測定") == "スペクトル解析と干渉測定", "仮名・漢字の間の空白を詰めていない"
     assert _norm_text("\uff7d\uff8d\uff9f\uff78 \uff84\uff99") == "スペクトル", "空白を詰めるのが NFKC より先になっている(半角の片仮名の間が詰まらない)"
@@ -2913,7 +3259,6 @@ def selftest():
     assert _short_terms("author:Li AND title:laser") == [] and _short_terms("title:Si AND author:Li") == ["Si"], \
         "引けるようになった著者の短い語に「当たらない」の注意を出している、または他の列の短い語の注意を消している"
     assert _visible(["/a", "/_dup/b", "/c"], {"/_dup/b"}, 2) == ["/a", "/c"], "移した重複を検索結果に出している"
-    assert _visible(["/a", "/_dup/b"], {"/_dup/b"}, 5, show_all=True) == ["/a", "/_dup/b"]
 
     # --- エージェント向け: has / cite / --json ---
     assert norm_id("https://doi.org/10.1103/PhysRevLett.100.123456") == ("doi", "10.1103/physrevlett.100.123456")
@@ -3133,7 +3478,7 @@ def selftest():
 
 CMDS = {"scan": scan, "add": add, "stats": stats, "rename": rename, "undo": undo,
         "review": review, "merge": merge, "pubver": pubver, "review-page": review_page, "review-ok": review_ok, "fix": fix, "info": info, "has": has, "cite": cite, "recent": recent, "relocate": relocate, "views": views, "move": move,
-        "enrich": enrich, "dedup": dedup, "search": search, "index": build_db,
+        "enrich": enrich, "dedup": dedup, "search": search, "index": build_db, "fulltext": fulltext,
         "nonpaper": nonpaper, "nonpaper-page": nonpaper_page, "nonpaper-ok": nonpaper_ok,
         "selftest": selftest}
 

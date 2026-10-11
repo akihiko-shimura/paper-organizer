@@ -2,6 +2,7 @@
 papers.jsonl
 papers.jsonl.conflict-*
 papers.db
+papers.db.*
 backups/
 .cache/
 
@@ -27,8 +28,9 @@ vet-batches.json
 # Your own regression cases for ladder_check.py (file names from your library)
 ladder_cases.json
 
-# Build products (compiled from vocr.swift / vec.swift on first use)
+# Build products (compiled from vocr.swift / vec.swift / ptext.swift on first use)
 vocr
+ptext
 vec
 
 # Local-only files
@@ -41,3 +43,6 @@ scan.log
 claude-session-log/
 leak-personal.txt
 leak-allow.txt
+
+# Full text of every page, read by `papers fulltext` (search only; rebuilt on demand)
+fulltext/

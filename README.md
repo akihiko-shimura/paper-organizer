@@ -55,8 +55,9 @@ paper that mentions it once come back as equals. Measured on the author's collec
 | Papers by an author (15 surnames) | 5% of the files returned are by the author; the rest cite the name | `author:` searches the author field only |
 | Find a scanned PDF (37 scans) | Found 1 | Scans are OCRed and indexed |
 
-Spotlight is the better tool for words that occur only deep inside a paper. It reads every page; this index holds
-the first 3,000 characters and the abstract. The order in which Spotlight shows results on screen could not be
+This tool also indexes the text of every page (scans are OCRed). Papers that match in the title, authors, abstract
+or the first 3,000 characters are listed first; papers that match only deeper in the text come after them. The table
+above was measured before every page was indexed. The order in which Spotlight shows results on screen could not be
 measured. Method and caveats: [docs/design.md, section 13](docs/design.md#13-search).
 
 ## How it differs from other tools
@@ -105,7 +106,7 @@ After identification:
 
 - **Abstracts** are fetched from OpenAlex.
 - **Duplicates** (same DOI) are moved to a holding folder. The largest file stays.
-- **Search** uses a SQLite full-text index over title, authors, journal, abstract and the first 3,000 characters.
+- **Search** uses a SQLite full-text index over title, authors, journal, abstract and the text of every page.
 - **Views** are folders of symlinks by journal, year, topic and first author, for Finder.
 - **Optional page check** (`vet.py`): Claude Haiku reads the title from an image of page 1. It can only send a record
   back to a person. It never sets a value.
@@ -196,7 +197,8 @@ To add new PDFs later, run `papers add` again. It only looks at files not yet in
 | Command | What it does |
 |---|---|
 | `papers add [folder]` | Index new PDFs; show planned renames and duplicates |
-| `papers search "fiber laser"` | Search. `AND`, `OR`, `NOT`, `"phrases"`, `title:`, `author:`, `journal:` |
+| `papers search "fiber laser"` | Search. `AND`, `OR`, `NOT`, `"phrases"`, `title:`, `author:`, `journal:`, `fulltext:`. `--kind=paper\|book\|other` filters by kind |
+| `papers fulltext` | Read the text of every page (for search; scans are OCRed) |
 | `papers has 10.1234/abcd` | Is this DOI or arXiv ID held, and where |
 | `papers cite 10.1234/abcd` | BibTeX |
 | `papers info` | Location and size of the index |
@@ -240,8 +242,8 @@ Both files are written in Japanese with English trigger phrases. Claude follows 
 | OpenAlex | DOIs; API key and contact email if set | `add` |
 | Anthropic | An image of page 1 | Only `vet.py --apply` |
 
-The PDF files themselves are not uploaded. **Do not publish your index** (`papers.jsonl`): it holds the first 3,000
-characters and the abstract of each paper, which are copyrighted text.
+The PDF files themselves are not uploaded. **Do not publish your index** (`papers.jsonl`) or the full
+text (`fulltext/`): they hold the text and the abstract of each paper, which are copyrighted.
 
 ## Limitations
 
@@ -253,7 +255,7 @@ characters and the abstract of each paper, which are copyrighted text.
 - **Editions with the same title** cannot be told apart if page 1 prints no journal, volume or page.
 - **Only arXiv preprints are recognised.** A preprint and its published version are two records, linked.
 - **Duplicates are detected by DOI only.**
-- **Search sees the first 3,000 characters.** Use Spotlight for words deeper in a paper.
+- **The text of scanned PDFs comes from OCR.** Misread words cannot be found by search.
 
 Full list: [docs/design.md, section 15](docs/design.md#15-known-gaps).
 

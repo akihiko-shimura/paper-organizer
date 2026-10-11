@@ -13,11 +13,12 @@ selftest に入れないのは意図(CLAUDE.md): ここは一時ディレクト�
   H. シンボリックリンク(~/.local/bin/papers)経由でも、リンクの場所ではなく本体の索引を読み書きする
   I. info は、検索の索引が索引より古いときに古いと言い、新しいときは言わない
   J. rename と undo は、動かしたファイルを指す項目(duplicate_of・published_copy)も書き換える
-  K. relocate は既定で書かない。--apply で動いたファイルのパスと指す先を直し、消えた重複だけを外す
+  K. relocate は既定で書かない。--apply で動いたファイルのパスと指す先を直し、消えた重複だけを外す。
+     見つからない記録は --forget --apply のときだけ外す(退避してから)
   L. views は元の PDF へのリンクを作り、作り直しで消すのは自分の作ったリンクだけ(普通のファイルがあれば止まる)
   M. move は既定で動かさない。--apply でファイルと索引を一緒に動かし、置き場の外・名前のぶつかりは止まる。undo で戻る
   N. scan は、手で動かしたファイル(パスの無い記録に当たる新しいファイル)があれば同定せずに止まる
-  O. add は --apply を受けない。新しい PDF があれば退避してから足し、ファイルは動かさず、検索の索引を作り直す。
+  O. add は --apply を受けない。新しい PDF があれば退避してから足し、ファイルは動かさず、全頁の本文を読み、検索の索引を作り直す。
      無ければ同定も退避もしない
   P. scan・add は、前回外部から取れなかった記録(error で fetch_failed あり)だけを同定し直し、同じパスの行を 2 つにしない。
      読み取りのエラー(fetch_failed なし)は取り直さない
@@ -26,11 +27,13 @@ selftest に入れないのは意図(CLAUDE.md): ここは一時ディレクト�
      同じ秒に 2 回動かしても、前の記録を上書きしない
   R. nonpaper は既定で動かさない。nonpaper-ok は索引に無いパス・知らない種類があれば書かない。--apply で退避してから
      ファイルと索引を一緒に動かし、undo で戻る。nonpaper-page は頁数を調べて索引に書き、候補だけをページに出す
+  T. 全頁の本文(fulltext/)は中身から作る鍵で置き、改名しても読み直さない。読めないファイルは置かない。テキスト層の乏しい
+     ファイルは全頁を OCR する。検索の索引は別名で作ってから置き換える。今の表で当たる記録が先に並ぶ。--kind で種類を絞る
 C は規約 1 の機械化: 新しい書き込み経路を足すと、ここで名指しで落ちる。
 許可リストに足すなら、なぜ _atomic_write を通さなくてよいかをコメントに書くこと。
 実行: python3 index_check.py
 """
-import ast, glob, json, os, tempfile
+import ast, glob, json, os, tempfile, time
 
 import organize as O
 
@@ -366,7 +369,35 @@ def check_relocate(d):
     assert "lost.pdf10.1/l" in by, "重複でない記録を、ファイルが見つからないだけで外した"
     assert by["a.pdf10.1/a"].get("preprint_arxiv_id") == "1501.01234", "消したプレプリントの arXiv ID を出版版に移していない"
     assert glob.glob(os.path.join(root, "backups", "*-before-relocate.jsonl")), "書く前に退避していない"
-    print("K ok: 既定は書かない、動いたパスを直す、消えた重複だけを外す、書く前に退避する")
+    before, n_bk = open(O.INDEX).read(), len(glob.glob(os.path.join(root, "backups", "*")))
+    O.sys.argv = ["organize.py", "relocate", "--root", root, "--forget"]
+    O.relocate()
+    assert open(O.INDEX).read() == before, "--forget だけで(--apply 無しで)書いた"
+    O.sys.argv = ["organize.py", "relocate", "--root", root, "--forget", "--apply"]
+    O.relocate()
+    left = [r["filename"] for r in map(json.loads, open(O.INDEX))]
+    assert left == ["a.pdf"], "--forget --apply が、見つからない記録を外していない、またはファイルのある記録まで外した: %s" % left
+    assert len(glob.glob(os.path.join(root, "backups", "*"))) == n_bk + 1, "--forget で外す前に退避していない"
+    # 移した重複が指している記録は、ファイルが無くても外さない(外すと、ファイルのある重複が検索に出ないまま残る)
+    kept = os.path.join(root, "old", "m.pdf")
+    os.makedirs(os.path.join(root, "_dup"), exist_ok=True); open(os.path.join(root, "_dup", "m.pdf"), "w").write("%PDF m")
+    write(O.INDEX, [dict(base, path=a_new, folder=os.path.dirname(a_new), filename="a.pdf"),
+                    dict(base, path=kept, folder=os.path.dirname(kept), filename="m.pdf", doi="10.1/m"),
+                    dict(base, path=os.path.join(root, "_dup", "m.pdf"), folder=os.path.join(root, "_dup"), filename="m.pdf",
+                         doi="10.1/m", duplicate_of=kept)])
+    O.relocate()
+    left = sorted(r["path"] for r in map(json.loads, open(O.INDEX)))
+    assert kept in left and len(left) == 3, "移した重複が指している記録を --forget で外した: %s" % left
+    # 全部の記録のファイルが無い(置き場が見えない)ときは、--forget を止める
+    os.remove(os.path.join(root, "_dup", "m.pdf")); os.remove(a_new)   # 置き場に PDF が 1 つも無い状態にする(対応付く先を残さない)
+    write(O.INDEX, [dict(base, path=kept, folder=os.path.dirname(kept), filename="m.pdf", doi="10.1/m")])
+    before = open(O.INDEX).read()
+    try:
+        O.relocate(); stopped = False
+    except SystemExit:
+        stopped = True
+    assert stopped and open(O.INDEX).read() == before, "全部の記録のファイルが無いのに、--forget で索引を空にした"
+    print("K ok: 既定は書かない、動いたパスを直す、消えた重複だけを外す、見つからない記録は --forget のときだけ外す、書く前に退避する")
 
 
 def check_views(d):
@@ -472,7 +503,14 @@ def check_add(d):
     base = {"rung": "text_doi", "source": "crossref", "year": 2016, "first_author": "Miller", "journal": "ACS Nano",
             "volume": "10", "pages": "2803-2818", "doi": "10.1/x", "title": "Old", "text": "Old paper"}
     write(O.INDEX, [dict(base, path=old, folder=lib, filename=os.path.basename(old))])
-    real, calls, real_pages = (O.resolve, O.enrich, O.build_db), [], O.pdf_pages
+    real, calls, real_pages, real_fill = (O.resolve, O.enrich, O.build_db), [], O.pdf_pages, O.fulltext_fill
+    read, fills = set(), []                                  # 全頁の本文は差し替える: まだ読んでいないパスの数を「読んだ」と返す
+    ocr_next = []                                            # 次の呼び出しで「OCR した」と返す件数
+    def fill(recs, do_ocr=True):
+        new = {r["path"] for r in recs} - read
+        read.update(new); fills.append((len(new), do_ocr))
+        return {"read": len(new), "ocr": ocr_next.pop() if ocr_next else 0, "ocr_pages": 0, "pending": 0}, []
+    O.fulltext_fill = fill
     O.resolve = lambda p: calls.append("resolve") or dict(base, path=p, folder=lib, filename=os.path.basename(p), year=2020,
                                                           doi="10.1/n", title="New", text="New paper")
     O.enrich = lambda: calls.append("enrich")
@@ -497,6 +535,7 @@ def check_add(d):
         assert os.path.exists(new) and os.path.exists(old), "add がファイルを動かした"
         assert recs[1].get("n_pages") == 7 and "=== 論文以外" in out, "新しい記録の頁数を記録していない、または論文以外の予定を出していない"
         assert calls == ["resolve", "enrich", "index"], "同定・抄録・検索の索引の順に進んでいない: %s" % calls
+        assert fills == [(2, True)] and "=== 全頁の本文" in out, "足したあとに全頁の本文を読んでいない(OCR つきで): %s" % fills
         assert len(backups()) == 1 and len(open(backups()[0]).readlines()) == 1, "足す前の索引を退避していない"
         report = out.split("=== 重複")[0]
         assert "new.pdf" in report and "New paper" in report and "Miller_ACSNano" not in report, "報告が新しい記録だけでない"
@@ -507,6 +546,13 @@ def check_add(d):
         stub_db(O.DB, "1")                                   # 作り方の古い検索の索引は、新しい PDF が無くても作り直す
         run(lib)
         assert calls == ["resolve", "enrich", "index", "index"], "作り方の古い検索の索引を作り直さない: %s" % calls
+        read.clear()                                         # 新しい PDF は無いが、全頁の本文を新しく読んだ → 検索の索引を作り直す
+        run(lib)
+        assert calls == ["resolve", "enrich", "index", "index", "index"], "全頁の本文を読んだのに、検索の索引を作り直さない: %s" % calls
+        ocr_next.append(1)                                   # 新しく読んだものは無いが、待ちだった OCR が進んだ
+        run(lib)
+        assert calls == ["resolve", "enrich"] + ["index"] * 4, "OCR が進んだのに、検索の索引を作り直さない: %s" % calls
+        del calls[-1]
         open(os.path.join(lib, "new2.pdf"), "w").write("%PDF")   # 3 回目: 抄録の取得が中断しても、報告と予定は出す
         def abort():
             raise SystemExit(1)
@@ -518,7 +564,7 @@ def check_add(d):
             "重複の予定を出していない、または dry run で動かした"
     finally:
         O.resolve, O.enrich, O.build_db = real
-        O.pdf_pages = real_pages
+        O.pdf_pages, O.fulltext_fill = real_pages, real_fill
     print("O ok: add は --apply を受けない、退避してから足す、ファイルは動かさない、無ければ何もしない")
 
 
@@ -1069,6 +1115,208 @@ def check_search_db(d):
           + ("" if folds else "(この SQLite はアクセントを畳めない)"))
 
 
+def check_fulltext(d):
+    """T. 全頁の本文と、それを入れた検索の索引。PDF の読み取り(pdftotext・PDFKit・OCR)とベクトルは差し替える。
+    鍵は中身から作る(改名で変わらない)、読んだ本文は読み直さない、読めないファイルは置かない、テキスト層の乏しい
+    ファイルは全頁を OCR する、検索の索引は別名で作ってから置き換える、順位は「今の表で当たる記録が先」、種類で絞れる。"""
+    import contextlib, io
+    root = os.path.join(d, "t"); lib = os.path.join(root, "lib"); os.makedirs(lib)
+    O.ROOT, O.INDEX, O.DB, O.FULLTEXT = root, os.path.join(root, "t.jsonl"), os.path.join(root, "t.db"), os.path.join(root, "fulltext")
+    f = lambda name: os.path.join(lib, name + ".pdf")
+    long = "ordinary sentence about optics. " * 40
+    # ファイルの中身(偽物) → pdftotext が返すもの。slow は時間切れ、bad は失敗、scan と blank はテキスト層が乏しい
+    cover = "this first page has a longer text layer than its OCR"
+    layer = {"good": (long + "\f" + long + " zyxwvut gadget gadget gadget QZ \u30b9\u30da\u30af \u30c8\u30eb\u89e3\u6790 \uff3a\uff25\uff22\uff32\uff21\f", None),
+             "slow": ("", "timed out after 30 s"),
+             "bad": ("", "exit status 1"), "scan": (cover + "\f\f\f", None), "blank": ("\f\f", None), "ocrfail": ("\f\f", None),
+             "long": (("filler words without the term. " * 3000) + "\f", None), "book": (long + " gadget\f", None)}
+    kit = {"slow": (long + " viakit\f", None), "bad": ("", "exit status 1")}
+    for name in layer:
+        open(f(name), "w").write("%PDF " + name)
+    rec = lambda name, **kw: dict({"path": f(name), "folder": lib, "filename": name + ".pdf", "rung": "unresolved", "text": ""}, **kw)
+    recs = [rec("good"), rec("slow"), rec("bad"), rec("scan"), rec("blank"), rec("ocrfail"), rec("long", text="one gadget here"),
+            rec("book", not_paper="user", kind="book", title="Handbook QZ"),
+            dict(rec("dup", text="uniqdupword"), path=os.path.join(root, "_dup", "dup.pdf"), duplicate_of=f("good"))]   # 移した重複(ファイルは無い)
+    write(O.INDEX, recs)
+    real = (O._run_text, O._ptext, O._ocr_pages, O._vocr, O._embed, O.OCR_CHUNK)
+    ran, ocred = [], []
+    name_of = lambda path: open(path).read().split()[-1]      # 中身から(パスは改名で変わる)
+    def run_text(cmd, timeout):
+        tool = "pdftotext" if cmd[0] == "pdftotext" else "pdfkit"
+        ran.append((tool, name_of(cmd[1])))
+        return (layer if tool == "pdftotext" else kit)[name_of(cmd[1])]
+    def ocr_pages(path, first, last):                         # scan: 1 頁目だけテキスト層より短い。blank: 画像にはできたが字が無い。ocrfail: 画像にできない
+        ocred.append((name_of(path), first, last))
+        return {"scan": {i: "short" if i == 1 else "scanned page %d wombat" % i for i in range(first, last + 1)},
+                "blank": {i: "" for i in range(first, last + 1)}}.get(name_of(path), {})
+    O._run_text, O._ptext, O._ocr_pages, O._vocr, O.OCR_CHUNK = run_text, lambda: "ptext", ocr_pages, lambda: None, 2
+    O._embed = lambda texts: [None] * len(texts)
+    quiet = contextlib.redirect_stderr(io.StringIO())
+    entry = lambda name: O._fulltext_load(O._file_key(f(name)))
+    try:
+        # 鍵: 中身から作る
+        k = O._file_key(f("good"))
+        os.rename(f("good"), f("renamed"))
+        assert O._file_key(f("renamed")) == k, "全頁の本文の鍵が改名で変わる(改名のたびに読み直すことになる)"
+        os.rename(f("renamed"), f("good"))
+        assert O._file_key(f("slow")) != k and O._file_key(f("nofile")) is None, "中身の違うファイルが同じ鍵になる、または無いファイルに鍵が付く"
+        big = [os.path.join(root, "big%d.bin" % i) for i in (1, 2)]
+        for path, end in zip(big, "AB"):
+            open(path, "w").write("x" * 200000 + end)
+        assert O._file_key(big[0]) != O._file_key(big[1]), "先頭の 64 KB と大きさが同じで、末尾だけが違うファイルが同じ鍵になる"
+        # 読む(OCR なし)。コマンドとして呼ぶ: papers fulltext --no-ocr
+        before = open(O.INDEX).read()
+        O.sys.argv = ["organize.py", "fulltext", "--no-ocr"]
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            O.fulltext()
+        assert open(O.INDEX).read() == before, "全頁の本文を読んで papers.jsonl を書き換えた"
+        assert "新しく読んだ 7 件" in out.getvalue() and "OCR 待ち 3 件" in out.getvalue() and "bad.pdf" in err.getvalue(), \
+            "papers fulltext --no-ocr の報告(読めた数・OCR 待ち・読めなかったファイル)が違う: %s %s" % (out.getvalue(), err.getvalue())
+        assert O._db_format_ok(), "papers fulltext が検索の索引を作り直していない"
+        assert len(entry("good")["pages"]) == 2 and entry("good")["how"] == "pdftotext", "頁に分けて置いていない"
+        assert entry("slow")["how"] == "pdfkit" and "viakit" in entry("slow")["pages"][0], "pdftotext が時間切れのとき、PDFKit で読んでいない"
+        assert entry("bad") is None, "読めなかったファイルを、空の本文として置いた(読めなかったことが分からなくなる)"
+        assert entry("scan")["thin"] and len(entry("scan")["pages"]) == 3 and not ocred, "--no-ocr で OCR した、または OCR 待ちの印が無い"
+        # もう 1 度: 置いてある本文は読み直さない。読めなかったファイルだけをまた読む
+        del ran[:]
+        with quiet:
+            got, failed = O.fulltext_fill(recs, do_ocr=False)
+        assert sorted(ran) == [("pdfkit", "bad"), ("pdftotext", "bad")] and got["read"] == 0, "置いてある本文を読み直した: %s" % ran
+        # OCR: テキスト層の乏しいファイルだけ、全頁を、区切って
+        with quiet:
+            got, failed = O.fulltext_fill(recs)
+        assert sorted(ocred) == [("blank", 1, 2), ("ocrfail", 1, 2), ("scan", 1, 2), ("scan", 3, 3)], \
+            "乏しいファイルの全頁を、区切って OCR していない: %s" % ocred
+        assert entry("scan")["how"] == "ocr" and entry("scan")["pages"][2] == "scanned page 3 wombat" and not entry("scan")["thin"], \
+            "OCR の結果を頁ごとに置いていない"
+        assert entry("scan")["pages"][0] == cover, "テキスト層のほうが字の多い頁を、OCR の結果で置き換えた"
+        assert got["ocr"] == 1 and got["ocr_pages"] == 2, "OCR した件数・頁数の報告が違う: %s" % got
+        assert entry("blank")["how"] == "pdftotext" and not entry("blank")["thin"], "OCR しても増えないファイルの、待ちの印を外していない"
+        assert entry("ocrfail")["thin"] and got["pending"] == 1 and sorted(os.path.basename(p) for p, _ in failed) == ["bad.pdf", "ocrfail.pdf"], \
+            "頁を画像にできなかったファイルを、OCR 済みにした(二度と OCR されない)、または報告していない: %s %s" % (got, failed)
+        del ocred[:]
+        with quiet:
+            O.fulltext_fill(recs)
+        assert ocred == [("ocrfail", 1, 2)], "OCR 済みのファイルをまた OCR した、または失敗したファイルを OCR し直していない: %s" % ocred
+        # 置き方の版が違う本文は使わず、読み直す
+        kb = O._file_key(f("book"))
+        write(O._fulltext_path(kb), [{"v": O.FULLTEXT_V - 1, "how": "pdftotext", "pages": ["old layout"], "thin": False}])
+        assert O._fulltext_load(kb) is None, "置き方の版が違う本文を使っている"
+        with quiet:
+            O.fulltext_fill(recs)
+        assert "gadget" in entry("book")["pages"][0], "置き方の版が違う本文を読み直していない"
+        # 検索の索引: 全頁の本文が入り、今の表で当たる記録が先に並ぶ
+        find = lambda c, q, n=10: [os.path.basename(p)[:-4] for p in O._fts(c, q, n)]
+        with quiet:
+            c = O.build_db()                                 # 上の fulltext_fill は直に呼んだので、作り直しも直に(コマンドなら自分で作り直す)
+        assert find(c, "zyxwvut") == ["good"] and find(c, "wombat") == ["scan"] and find(c, "viakit") == ["slow"], \
+            "全頁の本文(テキスト層・OCR・PDFKit)の語で引けない"
+        # long は先頭の本文に 1 度だけ gadget があり、全頁の本文がとても長い。1 つの表の bm25 なら good・book より下になる
+        assert find(c, "gadget") == ["long", "good", "book"], "今の表で当たる記録を先に、全頁の本文でだけ当たる記録を後ろに並べていない: %s" % find(c, "gadget")
+        assert find(c, "gadget", 1) == ["long"] and find(c, "gadget", 2) == ["long", "good"], "件数を、今の表で当たる記録から数えて切っていない"
+        assert find(c, "handbook gadget", 3) == ["book", "long", "good"], \
+            "全頁の本文の側を、今の表で当たった分だけ多めに引いていない(上位が重なると足りなくなる): %s" % find(c, "handbook gadget", 3)
+        assert find(c, "スペクトル解析") == find(c, "ZEBRA") == ["good"] and find(c, 'fulltext:"スペク トル解析"') == ["good"], \
+            "全頁の本文に、索引と同じ正規化(仮名・漢字の間の空白・全角)がかかっていない"
+        assert find(c, "fulltext:zyxwvut") == ["good"] and find(c, "fulltext:gadget AND title:Handbook") == ["book"], \
+            "fulltext: の列を名指しした式で引けない"
+        assert find(c, "QZ") == ["book", "good"], "3 文字以上の語が無い入力が全頁の本文を見ていない、または表題で当たる記録を先に並べていない: %s" % find(c, "QZ")
+        assert c.execute("SELECT v FROM meta WHERE k='fulltext'").fetchone()[0] == "7", "全頁の本文のある件数を記録していない"
+        c.close()
+        # 種類で絞る。全頁の本文でだけ当たった記録の前に、区切りの 1 行を出す
+        def search(*args):
+            O.sys.argv = ["organize.py", "search"] + list(args)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), quiet:
+                O.search()
+            return out.getvalue()
+        names = lambda out: [l.split("/")[-1][:-4] for l in out.splitlines() if l.startswith("    /")]      # パスの行
+        assert names(search("gadget")) == ["long", "good", "book"]
+        assert names(search("gadget", "--kind=book")) == ["book"] and names(search("gadget", "--kind=paper")) == ["long", "good"], \
+            "--kind で種類を絞っていない"
+        assert names(search("gadget", "--kind=book,paper", "--n=2")) == ["long", "good"], "--kind の複数指定・件数"
+        assert names(search("gadget", "--kind=book", "--n=1")) == ["book"], "--kind で外す分を見込んで多めに引いていない(小さい --n で 0 件になる)"
+        assert names(search("uniqdupword")) == [] and names(search("uniqdupword", "--all")) == ["dup"], "移した重複を出している、または --all で出さない"
+        MARK = "match only when the full text is searched"
+        out = search("gadget")
+        assert out.count(MARK) == 1 and out.index(MARK) > out.index("long.pdf") and out.index(MARK) < out.index("good.pdf"), \
+            "全頁の本文でだけ当たった記録の前に、区切りを 1 度だけ出していない"
+        marks = lambda *args: [(r["filename"], r.get("matched")) for r in map(json.loads, search(*args).splitlines())]
+        assert marks("gadget", "--json") == [("long.pdf", None), ("good.pdf", "fulltext"), ("book.pdf", "fulltext")], \
+            "--json で、全頁の本文でだけ当たった記録に印を付けていない: %s" % marks("gadget", "--json")
+        out = search("gadget", "--full")
+        assert out.count("matches only when the full text is searched") == 2 and out.index("matches only") > out.index("good.pdf"), \
+            "--full で、全頁の本文でだけ当たった記録に印を付けていない"
+        # 印は「全頁の本文を入れて初めて当たる」記録だけ: 表題でも当たる記録・fulltext: を名指しした式・fts 以外のモードには付けない
+        assert marks("QZ", "--json") == [("book.pdf", None), ("good.pdf", "fulltext")] and search("QZ").count(MARK) == 1, \
+            "3 文字以上の語が無い入力で、全頁の本文でだけ当たった記録に印を付けていない: %s" % marks("QZ", "--json")
+        assert marks("title:Handbook OR fulltext:nosuchword", "--json") == [("book.pdf", None)] \
+            and MARK not in search("fulltext:gadget"), "fulltext: を名指しした式で、表題で当たった記録にも「全頁の本文でだけ」の印を付けた"
+        real_vec = O._vec
+        O._vec = lambda c, q, n: [f("slow"), f("good")]       # ベクトルで来た記録(slow は語を含まない、good は全頁の本文にだけ含む)
+        try:
+            assert marks("gadget", "--mode=vec", "--json") == [("slow.pdf", None), ("good.pdf", None)] and MARK not in search("gadget", "--mode=vec"), \
+                "--mode=vec で来た記録に「全頁の本文でだけ」の印を付けた"
+            O._vec = lambda c, q, n: []
+            assert names(search("gadget", "--mode=hybrid")) == ["long"], "--mode=hybrid の語の側が、全頁の本文でだけ当たる記録を足している(今までと順位が変わる)"
+        finally:
+            O._vec = real_vec
+        try:
+            search("gadget", "--kind=nope"); stopped = False
+        except SystemExit:
+            stopped = True
+        assert stopped, "知らない --kind を黙って受けた"
+        O.sys.argv = ["organize.py", "info", "--json"]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            O.info()
+        assert json.loads(out.getvalue())["db_fulltext"] == 7, "info が全頁の本文のある件数を出していない"
+        O.sys.argv = ["organize.py", "info"]                 # 読めていない記録(bad)がある → 注意を出す
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            O.info()
+        assert "papers fulltext" in out.getvalue(), "全頁の本文の無い記録があるのに、info が注意を出していない"
+        # 作り直しは別名で作ってから置き換える: 途中で止まっても前の索引が残り、作りかけは残らない
+        good_db = open(O.DB, "rb").read()
+        stale, busy = O.DB + ".1.part", O.DB + ".2.part"
+        for part, age in ((stale, 7200), (busy, 0)):
+            open(part, "w").write("x"); os.utime(part, (time.time() - age,) * 2)
+        def boom(texts):
+            raise RuntimeError("embed failed")
+        O._embed = boom
+        try:
+            with quiet:
+                O.build_db(); raised = False
+        except RuntimeError:
+            raised = True
+        assert raised and open(O.DB, "rb").read() == good_db, "作り直しが途中で止まったとき、前の検索の索引が残っていない"
+        assert sorted(glob.glob(O.DB + ".*")) == [busy], "作りかけを残した、古い作りかけを掃除していない、または作っている最中かもしれない作りかけを消した: %s" % glob.glob(O.DB + ".*")
+        os.remove(busy)
+        O._embed = lambda texts: [None] * len(texts)
+        # 改名しても、全頁の本文は読み直さず、検索の索引に入る
+        os.rename(f("good"), f("renamed"))
+        recs[0].update(path=f("renamed"), filename="renamed.pdf")
+        write(O.INDEX, recs)
+        del ran[:]
+        with quiet:
+            O.fulltext_fill(recs)
+            c = O._db()
+        assert ("pdftotext", "good") not in ran and find(c, "zyxwvut") == ["renamed"], "改名したファイルの全頁の本文を読み直した、または索引に入らない"
+        c.close()
+        # ファイルが開けない(置き場が見えない・同期待ち)記録の全頁の本文は、前の検索の索引から引き継ぐ
+        os.remove(f("slow"))
+        write(O.INDEX, recs)
+        with quiet:
+            c = O._db()
+        assert find(c, "viakit") == ["slow"], "ファイルが開けない記録の全頁の本文が、作り直しで消えた"
+        c.close()
+    finally:
+        O._run_text, O._ptext, O._ocr_pages, O._vocr, O._embed, O.OCR_CHUNK = real
+    print("T ok: 全頁の本文は中身の鍵で置く(改名で読み直さない)、読めないファイルは置かない、乏しいファイルは全頁を OCR、"
+          "検索の索引は別名で作って置き換える、今の表で当たる記録が先、種類で絞れる")
+
+
 if __name__ == "__main__":
     check_static()
     with tempfile.TemporaryDirectory() as d:
@@ -1090,4 +1338,5 @@ if __name__ == "__main__":
         check_nonpaper(d)
         check_overwrite(d)
         check_search_db(d)
+        check_fulltext(d)
     print("index_check: ok")

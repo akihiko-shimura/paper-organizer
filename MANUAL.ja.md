@@ -14,7 +14,8 @@
 |---|---|---|
 | 論文 PDF | `<library>/` の下（フォルダは自由） | 同定できたものは `年_第一著者_略誌名_巻_号_開始頁.pdf` に改名する（例: `2019_Smith_OptExpress_27_8_11018.pdf`） |
 | 索引（正本） | `<repo>/papers.jsonl` | 1 行 1 論文。DOI・表題・著者・誌名・抄録・本文の先頭 3,000 字など |
-| 検索の索引 | `<repo>/papers.db` | `papers.jsonl` から作る SQLite。**直接は直さない**（作り直すだけ） |
+| 検索の索引 | `<repo>/papers.db` | `papers.jsonl` と全頁の本文から作る SQLite。**直接は直さない**（作り直すだけ） |
+| 全頁の本文 | `<repo>/fulltext/` | PDF の全頁から読んだ本文（スキャンは OCR）。検索専用。消してもよい（`papers fulltext` が読み直す） |
 | 設定 | `<repo>/config.json`（任意。見本は `config.example.json`） | 連絡先のメールアドレス（`mailto`）、ビューの出力先（`views`） |
 | コマンド `papers` | `~/.local/bin/papers` → `<repo>/organize.py` へのリンク | どのディレクトリからでも動く |
 | skill `paper-search` | `~/.claude/skills/paper-search` → `<repo>/skills/paper-search` | AI エージェント（Claude Code）に使い方を渡す |
@@ -30,7 +31,7 @@
 索引          /Users/…/paper-organizer/papers.jsonl
               更新 2026-09-23 17:25 ・ 15.3 MB ・ 3248 件（解決済み 2232 ・ 人手行き 842 ・ 重複として移した 129）
 検索の索引    /Users/…/paper-organizer/papers.db
-              更新 2026-09-23 17:26 ・ 72.7 MB ・ 3248 件
+              更新 2026-09-23 17:26 ・ 597.0 MB ・ 3248 件(全頁の本文あり 3248 件)
 最後の改名    2026-09-23 17:25
 最新の退避    /Users/…/backups/papers-20260923-172530-before-rename.jsonl
 ```
@@ -59,6 +60,7 @@ papers search "fiber laser" --n=30              # 件数を変える
 papers search "fiber laser" --full              # 表題・DOI・抄録を切らずに出す
 papers search "fiber laser" --json              # 1 行 1 記録の JSON(エージェント向け。本文は外す)
 papers search "fiber laser" --json --with-text  # 本文(1〜2 頁目の先頭 3,000 字)も入れる(出力は約 2.5 倍)
+papers search "fiber laser" --kind=paper       # 種類で絞る(paper・book・other)
 ```
 
 ### Finder で辿る: `views`
@@ -116,8 +118,16 @@ papers recent --n=20        # 索引に最後に入った順。--json もある
 
 ### 検索の決まり
 
-- **見る列**: 表題・著者・誌名・DOI・抄録・フォルダ名・本文の先頭 3,000 字。重みは表題 > DOI・著者 >
+- **見る列**: 表題・著者・誌名・DOI・抄録・フォルダ名・本文の先頭 3,000 字と、全頁の本文。重みは表題 > DOI・著者 >
   誌名 > 抄録 > フォルダ > 本文
+- **並ぶ順**: 表題・著者・誌名・DOI・抄録・フォルダ名・本文の先頭 3,000 字で当たる記録が先に並ぶ。全頁の本文でだけ当たる記録は、
+  その後ろに並ぶ（`-- the records below match only when the full text is searched …` の行が境目）。奥の頁に 1 度出るだけの語で、
+  表題に語のある論文が埋もれないようにするため
+  - `--n` 件が前の組で埋まれば、後ろの組は出ない。奥の語で探すときは、語を絞るか `fulltext:` の列を名指しする（下の表）
+  - 3 文字以上の語が無い入力（下の「別の経路」）も同じ: 表題・本文の先頭で当たる記録が先、全頁の本文でだけ当たる記録が後ろ
+  - `fulltext:` を名指しした式は別: 当たった記録の全部が、全頁の本文を入れた 1 つの順位で並び、境目の行は出ない
+    （長い文書は順位が下がりやすい）
+  - `--mode=vec`・`--mode=hybrid` は全頁の本文を見ない
 - **語の扱い**: 3 文字以上の語を OR で探し、部分一致でよい（`Smit` で Smith）
   - 語は、次のどちらかの連続で数える
     - 英数字。アクセント付きのラテン文字を含む（`Müller`・`Schrödinger` は 1 語）
@@ -139,20 +149,21 @@ papers recent --n=20        # 索引に最後に入った順。--json もある
     `レーザー` だけで探す）。使わなかった語は標準エラーに出る（`note: terms shorter than 3 characters were not used: 発振`）
   - 3 文字以上の語が 1 つも無い入力（`整合`・`Si`・`発振 制御`）は、既定の検索では、空白で分けた語のどれかを含む記録を
     部分一致で探す。このとき:
-    - 表題と本文だけを見る（著者・誌名・DOI・抄録・フォルダ名は見ない）
+    - 表題と本文（先頭 3,000 字と全頁）だけを見る（著者・誌名・DOI・抄録・フォルダ名は見ない）
     - 含む語の多い順に並べ（`発振 制御` は両方を含む記録が先）、`--n` 件で切る。それ以上の関連の強さは見ない。本文の抜粋は出ない
     - 短い語は他の語の一部にも当たる（`Si` は basis にも。英字の大文字と小文字は区別しない）。語として引くには、
       前後の空白や記号ごと引用符で囲む: `'" Si "'`・`'" Si-"'`・`'"(Si)"'`（3 文字以上になるので、ふつうの検索で引ける）。
       ただし囲んだ形にしか当たらない（`Si,` や `-Si` は落ちる。`" Si "` は語として載る記録の半分以下）。網羅するなら囲まない `Si` で引いて絞る。英字 2 文字の語は
       ほとんどの記録に当たるので、役に立つのは漢字・仮名の語
     - `%` と `_` は文字として探す（`T_c` は T_c、`50%` は 50%）
-- **本文は 1〜2 頁目の先頭 3,000 字までしか見ない**。多くの論文で 1 頁目の途中まで（表題・著者・抄録と、序論の冒頭）にあたる。
-  それより奥にある語は Spotlight で探す（macOS。`papers` とは別の、macOS が作る索引を引く）:
-
-  ```bash
-  mdfind -onlyin "<library>" "Kramers-Kronig"
-  ```
-
+- **全頁の本文**は `papers fulltext` が読んで `<repo>/fulltext/` に置く（`papers add` も、まだ読んでいないファイルの分を読む）。
+  - テキスト層の乏しい PDF（スキャン）は全頁を OCR する（1 頁 1 秒ほど）。頁ごとに、テキスト層と OCR の字の多いほうを採る。読み誤りの語は引けない
+  - 読めなかった・OCR できなかったファイル（壊れた PDF・PDF でないファイル）は件数と理由が出て、次に呼んだときにまた読む。
+    先頭 3,000 字が索引にあれば、それでは引ける
+  - 置き場が見えないとき（同期フォルダが開いていない）に検索の索引を作り直しても、全頁の本文は前の索引から引き継ぐ
+  - まだ読んでいない記録があると `papers info` に出る。`papers.jsonl` の `text` は今までどおり先頭 3,000 字（同定に使う）
+- **種類で絞る**: `--kind=paper`（論文）・`--kind=book`（本・ハンドブック）・`--kind=other`（学位論文・講義ノート・資料・特許）。
+  コンマで複数（`--kind=paper,book`）。付けなければ全部。種類は §5「論文以外を避ける」で付けたもの
 - `--mode=vec`（意味の近さ）・`--mode=hybrid` もあるが、測った範囲では既定（`fts`）より悪いので使わない
 - 結果には、同定できていない記録（年・著者が `-`）も出る。ファイル名と本文の抜粋で判断する
 - dedup が移した重複（`_重複文献/`・`_プレプリント(出版版あり)/`、利用者が消す予定）は出さない。出すには `--all`
@@ -172,7 +183,10 @@ papers recent --n=20        # 索引に最後に入った順。--json もある
 | `papers search '(laser OR amplifier) AND fiber NOT title:review'` | 括弧で組み合わせる |
 
 - `AND`・`OR`・`NOT` は**大文字**（小文字の and は普通の語として OR 検索になる）。`NOT` の前には語が要る
-- 列名: `title`・`author`（著者全員）・`first_author`・`journal`・`doi`・`abstract`・`folder`・`text`（本文の先頭 3,000 字）
+- 列名: `title`・`author`（著者全員）・`first_author`・`journal`・`doi`・`abstract`・`folder`・`text`（本文の先頭 3,000 字）・
+  `fulltext`（全頁の本文）。`'fulltext:"Kramers-Kronig"'` は全頁の本文だけを見る
+- `NOT` は、先に並ぶ組では先頭 3,000 字までで判定する（`laser NOT review` は、奥の頁に review がある論文も先の組に残る）。
+  全頁で判定するなら `fulltext:` を名指しする（`'laser NOT fulltext:review'`）
 - ハイフンや記号を含む語は引用符で囲む（`"second-harmonic"`。囲まないと書き方の誤りとして止まり、直し方が出る）
 - 2 文字以下の語（`CW`・`UV`）は索引で引けない。式に入れると注意が出て、その条件は 0 件になる。例外が 2 つ:
   - 著者の列（`author:`・`first_author:`）は、2 文字以下の姓を語として引ける（`author:Li` は Li だけに当たり、Lin や Oliver には
@@ -187,13 +201,15 @@ SQL で直接引くこともできる（読むだけ。`-list` を付けない�
 sqlite3 -list -separator ' | ' "<repo>/papers.db" "SELECT year, trim(first_author), title, path FROM p WHERE p MATCH 'title:laser AND title:fiber' ORDER BY bm25(p) LIMIT 20"
 ```
 
+表は 2 つある。`p` は今までの列、`f` は同じ列に `fulltext`（全頁の本文。頁の間は改頁の文字）を足したもの。
+
 ## 3. AI エージェントへ（検索するとき）
 
 Claude Code では skill `paper-search` が「手元の論文を探して」などの依頼で読み込まれ、以下を渡す。
 skill の無いエージェントには、このファイルを読ませる。
 
 1. `papers search "<語>" --json --n=20` で引く。表題・著者・誌名・分野の言い換えで 2〜4 回引き直す。
-   見つからなければ `mdfind` で本文を探す。DOI・arXiv ID が分かっているなら検索ではなく `papers has`
+   全頁の本文を入れて初めて当たる記録は、区切りの行の後ろに出る（`--json` では `"matched": "fulltext"`）。DOI・arXiv ID が分かっているなら検索ではなく `papers has`
 2. 答えには**ファイルのパス**を添える。書誌（年・誌名・DOI）は `rung` が §1 で「信じてよい」ものだけを事実として書く。
    `unverified` の DOI は「候補」と書く
 3. `published_doi` は出版版の DOI（手元の PDF はプレプリント）。`page_title` は Claude Haiku が 1 頁目から読んだ表題
@@ -213,7 +229,7 @@ papers add                    # 新しい PDF を足し、重複と改名の予�
 最初の 1 回だけは、置き場を付ける（索引が空で、置き場がまだ分からないため）: `papers add <library>`。
 
 `add` がすること: 索引を退避 → 新しいファイルだけ同定して足す → 抄録を取る → **新しい記録の報告** → 重複と改名の
-dry run → 検索の索引。フォルダを付けると（`papers add <フォルダ>`）その下だけを見る。
+dry run → まだ読んでいないファイルの全頁の本文を読む（スキャンは全頁を OCR。フォルダを付けても、索引の全体が対象）→ 検索の索引。フォルダを付けると（`papers add <フォルダ>`）その下だけを見る。
 
 - 報告は 1 件ごとに「記録（著者・年・誌名・表題）」と「本文の冒頭」を並べる。**この 2 行が同じ論文かを見る**
   （`add` は判定しない）。表紙のある PDF では、本文の冒頭は 2 頁目になる
@@ -246,7 +262,7 @@ papers enrich                 # 抄録を OpenAlex から(抄録の無い記録�
 papers dedup                  # 重複の確認(dry run)→ 問題なければ papers dedup --apply
 papers review                 # 同定できなかったものを unresolved.tsv へ(候補があれば付く)
 papers rename                 # 改名の確認(dry run)→ 問題なければ papers rename --apply
-papers index                  # 検索の索引を作り直す(数千件で 15 秒ほど)
+papers index                  # 検索の索引を作り直す(3,000 件で 30 秒ほど)
 ```
 
 - `scan` は索引にあるパスを飛ばすので、何度実行してもよい。途中で止めても続きから再開する。1 件あたり数秒
@@ -370,6 +386,18 @@ papers relocate            # 対応を見せるだけ
 papers relocate --apply    # 索引を退避してから書く
 papers index
 ```
+
+自分で消したファイルの記録を索引から外すには `--forget` を足す:
+
+```bash
+papers relocate --forget            # 外す記録を「見つからない(索引から外す)」として見せるだけ
+papers relocate --forget --apply    # 索引を退避してから外す
+```
+
+- 移した重複・プレプリントが指している記録は、ファイルが無くても外さない（注意が出る）。見つかったファイルが 1 つも無いときは止まる
+  （置き場が見えていないだけかもしれない）
+- `--forget` が外すのは、それ以外の、どのファイルにも対応付かなかった「見つからない」記録の全部。同期が済んでいないだけのファイルも
+  「見つからない」に出るので、一覧を見てから `--apply` する（退避から戻せる）
 
 - 名前が同じで 1〜3 頁目の本文も一致するファイルに対応付ける。名前も変えたなら本文だけで探す。スキャンで本文の無い
   ものは名前だけ（「名前だけ」と出る）。決まらないものは出すだけで書かない
