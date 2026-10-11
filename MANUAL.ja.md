@@ -382,9 +382,17 @@ papers index
 
 ### 戻す
 
-- 改名・`move`・`nonpaper --apply`: `papers undo`（最新の 1 回を戻す）
+- 改名・`move`・`nonpaper --apply`: `papers undo`（最新の 1 回を戻す）。元の場所にあとから別のファイルが置かれていたら、
+  上書きせずに「戻さなかった」と出して、そのファイルは今の場所に残す。元のフォルダが消されていれば作り直す
+- ファイルを動かすコマンド（`rename`・`move`・`dedup`・`nonpaper`・`undo`）は、移動先のファイルを上書きしない。大文字と小文字だけが
+  違う名前も同じ名前として扱う。同じ名前があるとき、`rename`・`dedup`・`nonpaper` は `_2` を付け、`move` は止まり、`undo` はその
+  ファイルを飛ばして続ける。予定のあとに移動先へファイルが現れた場合は、どのコマンドも動かす直前に止まる。途中で止まっても、
+  動かした分は索引に書いてある
+- `rename --apply` は、改名するものが無ければ記録を残さない（直前の `move`・`nonpaper` を `undo` で戻せるままにする）。
+  ファイルの無い記録は改名せず、件数を出す（`papers relocate` で索引を直してから）
 - 重複の移動: `<repo>/dedup-<時刻>.jsonl` に移動元と移動先の記録がある（自動の取り消しは無い。手で戻して `relocate`）
-- 索引: `<repo>/backups/` に書き換え前の `papers.jsonl` がある（`papers-<時刻>-before-<何>.jsonl`）。
+- 索引: `<repo>/backups/` に書き換え前の `papers.jsonl` がある（`papers-<時刻>-before-<何>.jsonl`）。ファイルを動かす・同定を書き換える
+  コマンドは、どれも書く前に退避する（`enrich` を除く）。
   戻すときは `<repo>/papers.jsonl` に上書きコピーして `papers index`
 
 ## 6. AI エージェントに頼むとき（例文）

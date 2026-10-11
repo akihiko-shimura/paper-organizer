@@ -14,7 +14,7 @@ cd "$(dirname "$0")" || exit 1
 
 BOUNDARIES='ネットワーク|_fetch(\|urlopen
 索引・キャッシュの書き込み|open(INDEX\|save_index\|_atomic_write
-ファイル移動|os\.rename\|shutil
+ファイル移動|os\.rename\|shutil\|_move_file(
 失敗の握り潰し|except Exception
 段の扱い|renamable\|needs_human\|dedup_key\|enrichable\|TERMINAL
 外部の書誌文字列|clean_text\|from_crossref\|from_arxiv\|it\.get("title")\|m\.get("title")

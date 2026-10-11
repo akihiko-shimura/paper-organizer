@@ -177,6 +177,7 @@ def apply_to_index(done):
         if O.vet_verdict(r) == "hold":
             r["vet_prev_rung"], r["rung"], r["held_by"] = r["rung"], "unverified", "vet"
             held.append(r)
+    O._backup("vet")                           # 段を unverified に書き換えるので、書く前に退避する
     O.save_index(recs, stamp)
     print("反映 %d 件。人に回した解決済み %d 件" % (sum(1 for r in recs if cid(r["path"]) in done), len(held)))
     for r in held:
@@ -263,6 +264,8 @@ def selftest():
     assert not targets(recs, {cid(__file__): {}}), "取得済みをもう一度課金しようとしている"
     assert not targets([dict(recs[0], page_type="article_first_page", page_title=None)], {}), \
         "索引に反映済みの記録を、パスが変わった(rename)だけでもう一度課金しようとしている"
+    apply_to_index({})
+    assert any(f.endswith("-before-vet.jsonl") for f in os.listdir(os.path.join(d, "backups"))), "索引を書く前に退避していない"
     print("vet selftest: ok")
 
 

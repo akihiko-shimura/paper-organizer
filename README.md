@@ -17,8 +17,10 @@ oe-27-8-11018.pdf                   →  2019_Smith_OptExpress_27_8_11018.pdf
 
 (Made-up examples of the naming scheme: `year_FirstAuthor_Journal_volume_issue_page.pdf`.)
 
-**Status.** Used by its author on one collection of about 3,200 PDFs. macOS only for now. Command output is in
-Japanese.
+**Status.** Used by its author on one collection of about 3,200 PDFs. Command output is in Japanese.
+
+**Platform: macOS only.** Windows and Linux are not supported. Windows support has not been considered yet, and there is no
+plan for it at present.
 
 This page is the short version, for people who want to use the tool.
 
@@ -144,7 +146,7 @@ The twelve alternatives that were measured and rejected:
 
 **Requirements**
 
-- macOS
+- macOS (the only supported platform)
 - Python 3.9 or later (no packages to install)
 - [poppler](https://poppler.freedesktop.org/): `brew install poppler`
 - Optional: Xcode command-line tools (`swiftc`), for OCR
@@ -243,7 +245,7 @@ characters and the abstract of each paper, which are copyrighted text.
 
 ## Limitations
 
-- **macOS only.** OCR and key storage use Apple frameworks.
+- **macOS only.** OCR and key storage use Apple frameworks. Windows and Linux are not supported, and Windows support is not planned at present.
 - **Output is in Japanese.** A glossary is in [MANUAL.md](MANUAL.md#8-glossary-of-japanese-output).
 - **One person, one machine.** The index stores absolute paths.
 - **Not everything can be identified.** Theses, books and many conference abstracts are not in Crossref. Titles in
@@ -262,7 +264,6 @@ Identification, abstracts and search use free public APIs. The only paid feature
 
 ## Roadmap
 
-- Windows support
 - Data outside the repository folder and relative paths, so one library can be used from several machines
 - English command output
 - A try-out in a field other than physics

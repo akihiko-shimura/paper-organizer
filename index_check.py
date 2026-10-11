@@ -21,6 +21,9 @@ selftest に入れないのは意図(CLAUDE.md): ここは一時ディレクト�
      無ければ同定も退避もしない
   P. scan・add は、前回外部から取れなかった記録(error で fetch_failed あり)だけを同定し直し、同じパスの行を 2 つにしない。
      読み取りのエラー(fetch_failed なし)は取り直さない
+  S. ファイルを動かす経路(rename・move・dedup・undo・nonpaper)は、移動先の別のファイルを上書きしない。os.rename を呼ぶのは
+     _move_file だけ(静的検査)。大小文字だけが違う名前は同じ名前として扱う。途中で失敗しても動かした分は索引に書く。
+     同じ秒に 2 回動かしても、前の記録を上書きしない
   R. nonpaper は既定で動かさない。nonpaper-ok は索引に無いパス・知らない種類があれば書かない。--apply で退避してから
      ファイルと索引を一緒に動かし、undo で戻る。nonpaper-page は頁数を調べて索引に書き、候補だけをページに出す
 C は規約 1 の機械化: 新しい書き込み経路を足すと、ここで名指しで落ちる。
@@ -63,6 +66,10 @@ def check_static():
     missing = [k for k in ALLOWED if k not in found]
     assert not missing, "許可リストの項目が見つからない(リストが古い): %s" % missing
     print("C ok: 書き込み open %d 箇所、すべて許可リスト内" % len(found))
+    # S の静的な半分: os.rename は黙って上書きするので、呼んでよいのは移動先を確かめる _move_file だけ
+    raw = sorted({fn.name for fn in ast.walk(tree) if isinstance(fn, ast.FunctionDef) for node in ast.walk(fn)
+                  if isinstance(node, ast.Call) and ast.unparse(node.func) in ("os.rename", "shutil.move", "os.renames")})
+    assert raw == ["_move_file"], "移動先を確かめずにファイルを動かす箇所がある(_move_file を通す): %s" % raw
 
 
 def write(path, recs):
@@ -173,6 +180,8 @@ def check_pubver(d):
     O.pubver()
     by = {r["path"]: r for r in map(json.loads, open(O.INDEX))}
     assert by["/a.pdf"].get("published_doi") == "10.1/a", "y を書いていない"
+    kept = glob.glob(os.path.join(os.path.dirname(O.INDEX), "backups", "*-before-pubver.jsonl"))
+    assert kept and "published_doi" not in open(kept[0]).read(), "pubver --merge が、書く前の索引を退避していない"
     assert not by["/b.pdf"].get("published_doi") and by["/b.pdf"].get("published_doi_rejected") == ["10.1/b"], "n の扱いが違う"
     assert not by["/c.pdf"].get("published_doi") and not by["/c.pdf"].get("published_doi_rejected"), "y/n 以外を書いた"
     assert [x[0] for x in O._pubver_filled(O.PUBVER_TSV, list(by.values()))] == ["/c.pdf"], "merge 後も守る行が違う"
@@ -203,6 +212,8 @@ def check_review_cand(d):
         O.from_crossref = real
     by = {r["path"]: r for r in map(json.loads, open(O.INDEX))}
     assert by["/y.pdf"].get("doi") == "10.1/y" and by["/y.pdf"]["rung"] == "manual", "ok=y の候補を書いていない"
+    kept = glob.glob(os.path.join(os.path.dirname(O.INDEX), "backups", "*-before-merge.jsonl"))
+    assert kept and '"manual"' not in open(kept[0]).read(), "merge が、書く前の索引を退避していない"
     assert by["/n.pdf"]["rung"] == "unresolved" and by["/n.pdf"].get("cand_rejected") == ["10.1/n"], "ok=n の扱いが違う"
     assert by["/pre.pdf"]["rung"] == "unresolved" and not by["/pre.pdf"].get("doi"), "ok の無い候補を書いた"
     assert by["/thesis.pdf"]["rung"] == "unresolved", "雑誌として引けない候補で空の手入力の記録を作った"
@@ -579,7 +590,7 @@ def check_nonpaper(d):
     recs[3]["duplicate_of"] = recs[0]["path"]                    # 動かすファイルを指す項目(repoint が直す)
     recs[0]["text"] = "see __KINDS__ and __PAGES__ </script>"   # 本文は外から来る。ページの型の印と同じ文字列があっても壊さない
     write(O.INDEX, recs)
-    real, real_rename, asked = O.pdf_pages, os.rename, []
+    real, real_rename, real_excl, asked = O.pdf_pages, os.rename, O._rename_excl, []
     O.pdf_pages = lambda p: asked.append(p) or (None if p.endswith("broken.pdf") else 20 if p.endswith("short.pdf") else 120)
     def run(fn, *a):
         O.sys.argv = ["organize.py", "x"] + list(a)
@@ -649,8 +660,8 @@ def check_nonpaper(d):
             n.append(1)
             if len(n) == 2:
                 raise OSError("EXDEV")
-            return real_rename(a, b)
-        os.rename = flaky
+            return real_excl(a, b)
+        O._rename_excl = flaky
         try:
             O.sys.argv = ["organize.py", "nonpaper", "--apply"]
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
@@ -658,7 +669,7 @@ def check_nonpaper(d):
             failed = False
         except OSError:
             failed = True
-        os.rename = real_rename
+        O._rename_excl = real_excl
         by = load()
         assert failed and len(os.listdir(dest)) == 1 and all(os.path.exists(r["path"]) and r["folder"] == os.path.dirname(r["path"]) for r in by.values()), \
             "移動の途中で失敗したとき、動かした分を索引に書いていない(索引が無いパスを指す)"
@@ -677,9 +688,308 @@ def check_nonpaper(d):
         assert stopped and open(there).read() == keep and os.path.exists(left["path"]), "移動先にあるファイルを上書きした"
         assert run(O.nonpaper, "--apply") == "ok" and sorted(os.listdir(dest)) == ["thesis.pdf", "thesis_2.pdf"], "失敗のあとの再実行で残りを動かさない"
     finally:
-        O.pdf_pages, os.rename = real, real_rename
+        O.pdf_pages, os.rename, O._rename_excl = real, real_rename, real_excl
     print("R ok: 頁数を調べて候補だけをページに出す、判定は索引に無いパス・知らない種類があれば書かない、既定は動かさない、"
           "退避してからファイルと索引を一緒に動かす、undo で戻る")
+
+
+def check_overwrite(d):
+    """S. 一時ディレクトリの置き場で、動かす経路が別のファイルを上書きしないことを見る。"""
+    import contextlib, io, time
+    root = os.path.join(d, "s"); lib = os.path.join(root, "lib")
+    for sub in ("a", "b", "c"):
+        os.makedirs(os.path.join(lib, sub))
+    O.ROOT, O.INDEX = root, os.path.join(root, "s.jsonl")
+    real_rename, real_excl = os.rename, O._rename_excl
+    insensitive = os.path.exists(os.path.join(lib, "A"))         # このボリュームが大小文字を区別しないか(macOS は既定でしない)
+    def put(sub, name, body):
+        p = os.path.join(lib, sub, name); open(p, "w").write(body); return p
+    def run(fn, *a):
+        O.sys.argv = ["organize.py", "x"] + list(a)
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                fn()
+            return "ok"
+        except SystemExit:
+            return "exit"
+        except OSError as e:
+            return type(e).__name__
+    load = lambda: [json.loads(l) for l in open(O.INDEX)]
+    sound = lambda: all(os.path.exists(r["path"]) and r["folder"] == os.path.dirname(r["path"]) and r["filename"] == os.path.basename(r["path"])
+                        for r in load())
+    bodies = lambda folder: sorted(open(os.path.join(folder, f)).read() for f in os.listdir(folder))
+    def flaky_on(k):                                             # k 回目の移動で失敗させる(_move_file が最初に呼ぶところで)
+        n = []
+        def f(a, b):
+            n.append(1)
+            if len(n) == k:
+                raise OSError("EXDEV")
+            return real_excl(a, b)
+        return f
+    base = {"rung": "text_doi", "source": "crossref", "year": 2016, "journal_short": "J", "volume": "1", "pages": "2"}
+    try:
+        # --- _move_file そのもの
+        x, y = put("a", "x.pdf", "X"), put("a", "y.pdf", "Y")
+        try:
+            O._move_file(x, y); hit = False
+        except FileExistsError:
+            hit = True
+        assert hit and open(x).read() == "X" and open(y).read() == "Y", "移動先の別のファイルを上書きした"
+        O._move_file(x, os.path.join(lib, "a", "z.pdf"))
+        assert not os.path.exists(x) and open(os.path.join(lib, "a", "z.pdf")).read() == "X", "空いている移動先へ動かさない"
+        def refused(src, dst):
+            try:
+                O._move_file(src, dst); return False
+            except FileExistsError:
+                return True
+        if insensitive:                                          # 大小文字だけを変える移動はしない(その場での書き換えは確かめていない)
+            assert refused(y, os.path.join(lib, "a", "Y.pdf")) and os.listdir(os.path.join(lib, "a")).count("y.pdf") == 1, \
+                "大小文字だけが違う名前へ、その場で動かした"
+        link, dead = os.path.join(lib, "a", "link.pdf"), os.path.join(lib, "a", "dead.pdf")
+        os.symlink(y, link); os.symlink(os.path.join(lib, "a", "nowhere"), dead)
+        assert refused(link, y) and open(y).read() == "Y" and not os.path.islink(y), "リンクを実体の名前へ動かして、実体を壊した"
+        assert refused(y, dead) and os.path.islink(dead) and open(y).read() == "Y", "壊れたリンクを、無いものとして上書きした"
+        O._move_file(y, y)
+        assert open(y).read() == "Y", "同じパスへの移動で止まった・壊した"
+        # OS が断る改名: 確かめた後に移動先へファイルが現れても(ここでは確認を黙らせて再現)、上書きしない
+        z = os.path.join(lib, "a", "z.pdf")
+        probe = os.path.join(lib, "a", "probe.pdf"); open(probe, "w").write("P")
+        excl = O._rename_excl(probe, os.path.join(lib, "a", "probe2.pdf"))        # この OS・ボリュームで使えるか
+        os.remove(os.path.join(lib, "a", "probe2.pdf")) if excl else os.remove(probe)
+        import sys as _sys
+        assert excl or not _sys.platform.startswith(("darwin", "linux")), "この OS では「移動先があれば断る改名」が使えるはずなのに、使えていない"
+        assert O._rename_excl(os.path.join(lib, "a", "no-such.pdf"), os.path.join(lib, "a", "free.pdf")) is False \
+            and not os.path.exists(os.path.join(lib, "a", "free.pdf")), "失敗した改名を「動かした」と返した"
+        O._rename_excl = lambda s, t: False                      # 使えない OS・ボリュームの枝: 確かめてから os.rename
+        try:
+            fb = os.path.join(lib, "a", "fb.pdf"); open(fb, "w").write("FB")
+            O._move_file(fb, os.path.join(lib, "a", "fb2.pdf"))
+            assert open(os.path.join(lib, "a", "fb2.pdf")).read() == "FB" and not os.path.exists(fb) and refused(os.path.join(lib, "a", "fb2.pdf"), y), \
+                "断る改名が使えないとき、確かめてからの移動をしない(または確かめない)"
+            os.remove(os.path.join(lib, "a", "fb2.pdf"))
+        finally:
+            O._rename_excl = real_excl
+        if excl:
+            real_lexists = os.path.lexists
+            os.path.lexists = lambda p: False
+            try:
+                late = refused(z, y)
+            finally:
+                os.path.lexists = real_lexists
+            assert late and open(y).read() == "Y" and open(z).read() == "X", "確認のあとに現れたファイルを上書きした(OS が断る改名を使っていない)"
+        assert O._occupied(dead, y) and O._occupied(link, y) and not O._occupied(y, y) and not O._occupied(os.path.join(lib, "a", "free.pdf"), y), \
+            "移動先が塞がっているかの判定: 壊れたリンク・リンクは「ある」、自分自身と何も無い場所は「無い」"
+        for f in os.listdir(os.path.join(lib, "a")):
+            os.remove(os.path.join(lib, "a", f))
+        # --- rename: 大小文字だけが違う改名先が 2 件。途中で失敗しても索引は合う
+        p1, p2 = put("a", "one.pdf", "ONE"), put("a", "two.pdf", "TWO")
+        rec = lambda p, **kw: dict(base, path=p, folder=os.path.dirname(p), filename=os.path.basename(p), **kw)
+        write(O.INDEX, [rec(p1, first_author="delong", doi="10.1/1"), rec(p2, first_author="DeLong", doi="10.1/2")])
+        names = lambda folder: sorted(os.listdir(folder))
+        assert run(O.rename, "--apply") == "ok" and sound() and bodies(os.path.join(lib, "a")) == ["ONE", "TWO"], \
+            "rename が、大小文字だけが違う名前へ 2 件を改名して 1 件を上書きした(または止まった): %s" % os.listdir(os.path.join(lib, "a"))
+        got = names(os.path.join(lib, "a"))
+        kept_b = lambda tag: glob.glob(os.path.join(root, "backups", "*-before-%s.jsonl" % tag))
+        assert len(kept_b("rename")) == 1 and open(kept_b("rename")[0]).read().count("one.pdf") == 2, "rename --apply が、動かす前の索引を退避していない"
+        assert len({O._same_name(f) for f in got}) == 2, "rename が、大小文字だけが違う 2 つの名前を付けた(区別しないボリュームでは上書きになる): %s" % got
+        n_trails = len(glob.glob(os.path.join(root, "renames-*.jsonl")))
+        time.sleep(1.1)
+        assert run(O.rename, "--apply") == "ok" and names(os.path.join(lib, "a")) == got and sound(), "もう _2 付きの名前になっている記録を、もう一度動かそうとした"
+        assert len(glob.glob(os.path.join(root, "renames-*.jsonl"))) == n_trails, "動かすものが無いのに記録を書いた(直前の move を undo で戻せなくなる)"
+        q1, q2 = put("b", "q1.pdf", "Q1"), put("b", "q2.pdf", "Q2")
+        write(O.INDEX, [rec(q1, first_author="Able", doi="10.1/1b"), rec(q2, first_author="Baker", doi="10.1/2b")])
+        O._rename_excl = flaky_on(2)
+        time.sleep(1.1)
+        assert run(O.rename, "--apply") == "OSError" and sound() and len(os.listdir(os.path.join(lib, "b"))) == 2, \
+            "rename が途中で失敗したとき、動かした分を索引に書いていない"
+        O._rename_excl = real_excl
+        for f in os.listdir(os.path.join(lib, "b")):
+            os.remove(os.path.join(lib, "b", f))
+        # --- ファイルの無い記録の名前へ、別の記録を改名しない(続く改名が「その名前にあるファイル」を動かし、PDF と書誌が入れ替わる)
+        g1 = put("b", "g.pdf", "G")
+        ghost = os.path.join(lib, "b", "2016_Able_J_1_2.pdf")   # 記録だけあって、ファイルは無い
+        write(O.INDEX, [rec(g1, first_author="Able", doi="10.1/g1"), dict(rec(ghost, doi="10.1/u"), rung="unresolved")])
+        said = io.StringIO()
+        O.sys.argv = ["organize.py", "rename"]
+        with contextlib.redirect_stdout(said):
+            O.rename()
+        assert "2016_Able_J_1_2_2.pdf" in said.getvalue(), "同定できていない記録の(ファイルの無い)パスへ、別の記録を改名する予定にした"
+        write(O.INDEX, [rec(g1, first_author="Able", doi="10.1/g1"), rec(ghost, first_author="Baker", doi="10.1/g2")])
+        said = io.StringIO()
+        with contextlib.redirect_stdout(said):
+            O.rename()
+        assert "ファイルが無いので改名しない 1" in said.getvalue() and "\n1 rename" in said.getvalue(), "予定(dry run)が、ファイルの無い記録を報告しない"
+        time.sleep(1.1)
+        said = io.StringIO()
+        O.sys.argv = ["organize.py", "rename", "--apply"]
+        with contextlib.redirect_stdout(said), contextlib.redirect_stderr(io.StringIO()):
+            O.rename()
+        by = {r["doi"]: r["path"] for r in load()}
+        assert names(os.path.join(lib, "b")) == ["2016_Able_J_1_2_2.pdf"] and open(by["10.1/g1"]).read() == "G" and by["10.1/g2"] == ghost, \
+            "ファイルの無い記録の名前へ別の記録を改名した(または、その PDF を無い記録の名前に付け替えた): %s %s" % (names(os.path.join(lib, "b")), by)
+        assert "ファイルが無いので改名しない 1" in said.getvalue() and "\n1 rename" in said.getvalue(), \
+            "ファイルの無い記録を、改名の予定に数えている(または報告しない): %s" % said.getvalue()[-120:]
+        assert run(O.undo) == "ok" and open(g1).read() == "G"
+        os.remove(g1)
+        # --- undo は後に動かしたものから戻す。同じファイルを 2 度動かした記録(A→B、B→C)でも、ファイルも索引も A へ戻る
+        # 直す前の rename が書いた記録の形: 記録 X が c1→c2、ファイルの無い記録 Y が c2→c3(X の PDF が Y の名前になった)
+        c1, c2, c3 = [os.path.join(lib, "b", n) for n in ("c1.pdf", "c2.pdf", "c3.pdf")]
+        open(c3, "w").write("CH")
+        write(O.INDEX, [rec(c2, first_author="A", doi="10.1/X"), rec(c3, first_author="B", doi="10.1/Y")])
+        time.sleep(1.1)
+        with open(O._trail("renames"), "w") as f:
+            f.write(json.dumps({"from": c1, "to": c2}) + "\n" + json.dumps({"from": c2, "to": c3}) + "\n")
+        assert run(O.undo) == "ok" and names(os.path.join(lib, "b")) == ["c1.pdf"] and open(c1).read() == "CH", \
+            "undo が、2 度動かされたファイルを最初の場所まで戻さない: %s" % names(os.path.join(lib, "b"))
+        by = {r["doi"]: r["path"] for r in load()}
+        assert by == {"10.1/X": c1, "10.1/Y": c2}, "undo が、索引を 1 段ずつ戻していない(2 件の記録が同じ PDF を指す): %s" % by
+        os.remove(c1)
+        # --- 同じ秒の 2 つ目の記録は前の記録を上書きしない。undo は後のほうを読む
+        b1, b2 = O._backup("x"), O._backup("x")                 # 同じ秒の 2 つ目の退避は、前の退避を上書きしない
+        assert b1 != b2 and os.path.exists(b1) and os.path.exists(b2) and sorted([b1, b2]) == [b1, b2] and b2.endswith("-before-x.jsonl"), \
+            "同じ秒の退避の名前が重なる(前の退避を上書きする)、または名前の形が変わった: %s" % os.path.basename(b2)
+        for prefix in ("renames", "dedup"):
+            t1 = O._trail(prefix); open(t1, "w").close()
+            t2 = O._trail(prefix)
+            assert t1 != t2 and sorted([t1, t2]) == [t1, t2] and os.path.basename(t1).startswith(prefix + "-"), \
+                "同じ秒の記録の名前が重なる、または名前の順が作った順でない(%s)" % prefix
+            os.remove(t1)
+        # --- undo: 元の場所に別のファイルが置かれていたら上書きしない。元のフォルダが消されていても戻す
+        for f in os.listdir(root):
+            if f.startswith("renames-"):
+                os.remove(os.path.join(root, f))
+        for f in os.listdir(os.path.join(lib, "a")):
+            os.remove(os.path.join(lib, "a", f))
+        m1, m2 = put("a", "m1.pdf", "M1"), put("b", "m2.pdf", "M2")
+        write(O.INDEX, [rec(m1, first_author="A", doi="10.1/3"), rec(m2, first_author="B", doi="10.1/4")])
+        assert run(O.move, m1, m2, "--to", "c", "--apply") == "ok" and sound()
+        put("a", "m1.pdf", "INTRUDER")                           # 元の場所に、あとから別のファイル
+        os.rmdir(os.path.join(lib, "b"))                         # 元のフォルダが消された
+        said = io.StringIO()
+        O.sys.argv = ["organize.py", "undo"]
+        with contextlib.redirect_stdout(said):
+            O.undo()
+        assert "戻さなかった 1 件" in said.getvalue() and "m1.pdf" in said.getvalue(), "undo が、戻さなかったファイルを報告しない"
+        assert kept_b("undo") and all(os.path.join(lib, "c") in l for l in open(sorted(kept_b("undo"))[-1])), "undo が、戻す前の索引を退避していない"
+        assert open(m1).read() == "INTRUDER" and open(os.path.join(lib, "c", "m1.pdf")).read() == "M1", "undo が、元の場所に置かれた別のファイルを上書きした"
+        by = {r["doi"]: r["path"] for r in load()}
+        assert open(m2).read() == "M2" and sound() and by["10.1/4"] == m2, "undo が、消された元のフォルダへ戻さない"
+        assert by["10.1/3"] == os.path.join(lib, "c", "m1.pdf"), "undo が、戻せなかった記録の索引まで元のパスに戻した(別のファイルを指す)"
+        w1, w2 = put("a", "w1.pdf", "W1"), put("b", "w2.pdf", "W2")
+        write(O.INDEX, [rec(w1, first_author="A", doi="10.1/w1"), rec(w2, first_author="B", doi="10.1/w2")])
+        time.sleep(1.1)
+        assert run(O.move, w1, w2, "--to", "c", "--apply") == "ok" and sound()
+        O._rename_excl = flaky_on(2)
+        assert run(O.undo) == "OSError" and sound() and sorted(os.path.basename(r["folder"]) for r in load()) in (["a", "c"], ["b", "c"]), \
+            "undo が途中で失敗したとき、戻した分を索引に書いていない(または戻していない分まで書いた)"
+        O._rename_excl = real_excl
+        assert run(O.undo) == "ok" and sound() and sorted(os.path.basename(r["folder"]) for r in load()) == ["a", "b"], "undo のやり直しで残りを戻さない"
+        n_undo = len(kept_b("undo"))
+        assert run(O.undo) == "ok" and len(kept_b("undo")) == n_undo, "戻すものが無いのに、undo が索引を退避した(打つたびに退避が増える)"
+        # 手で元に戻してから undo: 索引だけを戻す。置き場が見えないとき(どちらの場所にも無い)は、索引を戻さない
+        time.sleep(1.1)
+        assert run(O.move, w1, w2, "--to", "c", "--apply") == "ok" and sound()
+        real_rename(os.path.join(lib, "c", "w1.pdf"), w1)
+        hidden = lib + ".hidden"
+        real_rename(lib, hidden)                                 # 置き場が見えない(Drive が止まっている)
+        before = open(O.INDEX).read()
+        assert run(O.undo) == "ok" and open(O.INDEX).read() == before, "置き場が見えないのに、undo が索引だけを元のパスに戻した"
+        real_rename(hidden, lib)
+        assert run(O.undo) == "ok" and sound() and sorted(os.path.basename(r["folder"]) for r in load()) == ["a", "b"], \
+            "手で元に戻したファイルの索引を、undo が戻さない"
+        # 動かすものの無い rename --apply のあとでも、直前の move を undo で戻せる
+        time.sleep(1.1)
+        write(O.INDEX, [dict(r, filename=os.path.basename(r["path"])) for r in load()])
+        cur = {r["doi"]: r["path"] for r in load()}
+        assert run(O.move, cur["10.1/w1"], "--to", "c", "--apply") == "ok"
+        O.filename_for, real_ff = (lambda r: os.path.splitext(r["filename"])[0]), O.filename_for   # どの記録も今の名前のまま(予定が空)
+        try:
+            assert run(O.rename, "--apply") == "ok"
+        finally:
+            O.filename_for = real_ff
+        assert run(O.undo) == "ok" and {r["doi"]: r["path"] for r in load()} == cur and sound(), "予定が空の rename のあと、直前の move を undo で戻せない"
+        # --- move: 大小文字だけが違う 2 件を同じフォルダへ。途中の失敗でも索引は合う
+        for sub in ("a", "b", "c"):
+            os.makedirs(os.path.join(lib, sub), exist_ok=True)
+            for f in os.listdir(os.path.join(lib, sub)):
+                os.remove(os.path.join(lib, sub, f))
+        v1, v2, v3 = put("a", "Paper.pdf", "P1"), put("b", "paper.pdf", "P2"), put("b", "other.pdf", "P3")
+        write(O.INDEX, [rec(v1, first_author="A", doi="10.1/5"), rec(v2, first_author="B", doi="10.1/6"), rec(v3, first_author="C", doi="10.1/7")])
+        assert run(O.move, v1, v2, "--to", "c", "--apply") == "exit" and os.path.exists(v1) and os.path.exists(v2) and not os.listdir(os.path.join(lib, "c")), \
+            "move が、大小文字だけが違う 2 件を同じフォルダへ動かそうとした"
+        O._rename_excl = flaky_on(2)
+        time.sleep(1.1)
+        assert run(O.move, v1, v3, "--to", "c", "--apply") == "OSError" and sound(), "move が途中で失敗したとき、動かした分を索引に書いていない"
+        O._rename_excl = real_excl
+        # --- dedup: 同じ DOI の 3 件。移す 2 件の名前が大小文字だけ違う
+        for sub in ("a", "b", "c"):
+            for f in os.listdir(os.path.join(lib, sub)):
+                os.remove(os.path.join(lib, sub, f))
+        d1, d2, d3 = put("a", "keep.pdf", "KEEP-largest"), put("b", "Dup.pdf", "D2"), put("c", "dup.pdf", "D3")
+        write(O.INDEX, [rec(d, first_author="A", doi="10.1/8") for d in (d1, d2, d3)])
+        n_ren = len(glob.glob(os.path.join(root, "renames-*.jsonl")))
+        assert run(O.dedup, "--apply") == "ok" and sound(), "dedup のあと、索引のパス・フォルダ・ファイル名が合わない(_2 を付けた名前など)"
+        aside = [os.path.join(dp, f) for dp, _, fs in os.walk(lib) for f in fs if os.sep + "_" in dp]
+        assert sorted(open(p).read() for p in aside) == ["D2", "D3"] and open(d1).read() == "KEEP-largest", \
+            "dedup が、大小文字だけが違う 2 件を移して 1 件を上書きした(または止まった): %s" % aside
+        assert len({O._same_name(os.path.basename(p)) for p in aside}) == 2, "dedup が、大小文字だけが違う 2 つの名前で移した: %s" % aside
+        assert kept_b("dedup") and "duplicate_of" not in open(sorted(kept_b("dedup"))[0]).read(), "dedup --apply が、動かす前の索引を退避していない"
+        assert glob.glob(os.path.join(root, "dedup-*.jsonl")) and len(glob.glob(os.path.join(root, "renames-*.jsonl"))) == n_ren, \
+            "dedup の記録を renames-* に書いた(undo が dedup の記録を読んで、重複の移動を巻き戻す)"
+        e1, e2, e3 = put("a", "e-keep.pdf", "E-KEEP-largest"), put("b", "e2.pdf", "E2"), put("c", "e3.pdf", "E3")
+        write(O.INDEX, [rec(e, first_author="A", doi="10.1/9") for e in (e1, e2, e3)])
+        O._rename_excl = flaky_on(2)
+        time.sleep(1.1)
+        assert run(O.dedup, "--apply") == "OSError" and sound() and sum(1 for r in load() if r.get("duplicate_of")) == 1, \
+            "dedup が途中で失敗したとき、動かした分を索引に書いていない"
+        O._rename_excl = real_excl
+        # --- 同じファイルを指す記録が 2 行あっても重複ではない(重複とみなすと、唯一の実体を移してしまう)
+        import shutil
+        for sub in os.listdir(lib):                              # 前の場合の残り(移した重複のフォルダも)を片付ける
+            shutil.rmtree(os.path.join(lib, sub))
+        for sub in ("a", "b", "c"):
+            os.makedirs(os.path.join(lib, sub))
+        only = put("a", "only.pdf", "ONLY")
+        alias = os.path.join(lib, "b", "alias.pdf"); os.symlink(only, alias)
+        twin = os.path.join(lib, "a", "ONLY.pdf") if insensitive else only
+        write(O.INDEX, [rec(only, first_author="A", doi="10.1/s"), rec(only, first_author="A", doi="10.1/s"),
+                        rec(alias, first_author="A", doi="10.1/s"), rec(twin, first_author="A", doi="10.1/s")])
+        before = open(O.INDEX).read()
+        said = io.StringIO()
+        O.sys.argv = ["organize.py", "dedup", "--apply"]
+        try:
+            with contextlib.redirect_stdout(said), contextlib.redirect_stderr(io.StringIO()):
+                O.dedup()
+        except OSError:                                          # 同じファイルを 2 度動かそうとして止まった場合も、下の assert で言う
+            pass
+        assert os.path.exists(only) and open(only).read() == "ONLY" and os.path.islink(alias) and open(O.INDEX).read() == before, \
+            "dedup が、同じファイルを指す記録(同じパス・リンク・大小文字違い)を重複とみなして、実体かリンクを動かした"
+        assert "同じファイルを指す記録" in said.getvalue() and "3 行" in said.getvalue(), "同じファイルを指す行があることを報告しない: %s" % said.getvalue()
+        real_dup = put("c", "copy.pdf", "COPY-of-the-same-paper")
+        write(O.INDEX, [rec(alias, first_author="A", doi="10.1/s"), rec(only, first_author="A", doi="10.1/s"), rec(only, first_author="A", doi="10.1/s"),
+                        rec(twin, first_author="A", doi="10.1/s"), rec(real_dup, first_author="A", doi="10.1/s")])
+        time.sleep(1.1)
+        assert run(O.dedup, "--apply") == "ok"
+        assert os.path.islink(alias) and len({r["path"] for r in load()}) == 2, \
+            "同じファイルを別の書き方(リンク・大小文字)で指す行が、移した後に別々のパス(無いパス)を指す。またはリンクのほうを動かした: %s" % sorted({r["path"] for r in load()})
+        left = sorted(open(os.path.join(dp, f)).read() for dp, _, fs in os.walk(lib) for f in fs if not os.path.islink(os.path.join(dp, f)))
+        aside = [f for dp, _, fs in os.walk(lib) for f in fs if os.sep + "_" in dp]
+        assert left == ["COPY-of-the-same-paper", "ONLY"] and len(aside) == 1 and sound(), \
+            "同じファイルを指す 2 行と、本当の重複 1 つ: 動かすファイルは 1 つだけで、索引は合う: %s %s" % (left, aside)
+        if not insensitive:                                      # 大小文字を区別するボリュームでは、Paper.pdf と paper.pdf は別のファイル = 重複
+            for sub in os.listdir(lib):
+                shutil.rmtree(os.path.join(lib, sub))
+            os.makedirs(os.path.join(lib, "a"))
+            k1, k2 = put("a", "Paper.pdf", "K1-largest"), put("a", "paper.pdf", "K2")
+            write(O.INDEX, [rec(k1, first_author="A", doi="10.1/k"), rec(k2, first_author="A", doi="10.1/k")])
+            time.sleep(1.1)
+            assert run(O.dedup, "--apply") == "ok" and sum(1 for r in load() if r.get("duplicate_of")) == 1 and sound(), \
+                "大小文字を区別するボリュームで、名前の大小文字だけが違う別々のファイルを「同じファイル」とみなした"
+    finally:
+        O._rename_excl = real_excl
+    print("S ok: 動かす経路は別のファイルを上書きしない(大小文字だけが違う名前も)、途中で失敗しても索引は合う、"
+          "同じ秒の記録を上書きしない、undo は元の場所の別のファイルを残す" + ("" if insensitive else "(このボリュームは大小文字を区別する)")
+          + ("" if excl else "(この OS・ボリュームは、移動先があれば断る改名を使えない)"))
 
 
 def check_search_db(d):
@@ -778,5 +1088,6 @@ if __name__ == "__main__":
         check_add(d)
         check_retry(d)
         check_nonpaper(d)
+        check_overwrite(d)
         check_search_db(d)
     print("index_check: ok")

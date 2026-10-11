@@ -386,9 +386,17 @@ papers index
 
 ### Undoing
 
-- Renames, `move` and `nonpaper --apply`: `papers undo` (reverts the most recent one)
+- Renames, `move` and `nonpaper --apply`: `papers undo` (reverts the most recent one). If another file has since been put in the original place,
+  it is not overwritten: the command prints 「戻さなかった」 (not reverted) and leaves that file where it is now. If the original folder was deleted, it is created again
+- The commands that move files (`rename`, `move`, `dedup`, `nonpaper`, `undo`) never overwrite a file at the destination. Names that differ only in
+  letter case count as the same name. When the name is taken, `rename`, `dedup` and `nonpaper` append `_2`, `move` stops, and `undo` skips that
+  file and goes on. If a file appears at the destination after the plan was made, every command stops just before moving. If a command stops partway,
+  the files already moved are in the index
+- `rename --apply` leaves no trail when there is nothing to rename (so the preceding `move` or `nonpaper` can still be reverted with `undo`).
+  Records whose file is missing are not renamed; their number is printed (correct the index with `papers relocate` first)
 - Moves of duplicates: `<repo>/dedup-<time>.jsonl` records the source and the destination of each move (there is no automatic undo. Move the files back by hand and run `relocate`)
-- Index: `<repo>/backups/` holds the `papers.jsonl` from before each rewrite (`papers-<time>-before-<what>.jsonl`).
+- Index: `<repo>/backups/` holds the `papers.jsonl` from before each rewrite (`papers-<time>-before-<what>.jsonl`). Every command that moves files or rewrites an identification
+  backs up first (`enrich` does not).
   To restore, copy the backup over `<repo>/papers.jsonl` and run `papers index`
 
 ## 6. Asking an AI agent (example requests)

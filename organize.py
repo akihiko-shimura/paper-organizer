@@ -691,6 +691,100 @@ def dedup_key(r):
     return (r.get("doi") or "").lower() or (r.get("arxiv_id") or "") or None
 
 
+# ---------- ファイルを動かすときの守り(rename・move・dedup・nonpaper・undo が同じものを通す) ----------
+# os.rename は、移動先にファイルがあると黙って上書きする。置き場のボリューム(macOS・Google Drive)は大文字と小文字、
+# 合成形と分解形を区別しないので、文字列が違っても同じファイルを指すことがある(Thesis.pdf と thesis.pdf)。
+def _same_name(p):
+    """パスを、置き場のボリュームが同じファイルとみなす形にそろえる(予定の中の同名を見つける鍵)。"""
+    return unicodedata.normalize("NFC", p).casefold()
+
+
+def _occupied(dst, src):
+    """dst に、src 以外の何かがあるか。壊れたリンクも「ある」に数える(lexists)。src と同じパスなら空いているとみなす。
+    大小文字だけが違う名前は、同じファイルを指していても「ある」とする: その場で名前の書き方だけを変える改名はしない
+    (Google Drive の上での動きを確かめていない。同じ中身かをリンクをたどって見ると、リンクを実体の名前へ動かして実体を壊す)。"""
+    return os.path.lexists(dst) and os.path.abspath(dst) != os.path.abspath(src)
+
+
+def _rename_excl(src, dst):
+    """「移動先に何かあれば失敗する改名」を、OS に 1 回の呼び出しで頼む(macOS の renamex_np、Linux の renameat2)。
+    確かめてから動かすまでの間に、同期などが移動先へファイルを作っても上書きしない。
+    True = 動かした。False = この OS・ボリュームではできない(呼び出し側が、確かめてから os.rename する)。移動先があれば FileExistsError。"""
+    import ctypes, errno
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        s, d = os.fsencode(src), os.fsencode(dst)
+        if b"\0" in s or b"\0" in d:           # C の文字列は NUL で切れる。os.rename に断らせる
+            return False
+        if sys.platform == "darwin":
+            fn = libc.renamex_np
+            fn.argtypes, fn.restype = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint], ctypes.c_int
+            rc = fn(s, d, 0x4)                                   # RENAME_EXCL
+        elif sys.platform.startswith("linux"):
+            fn = libc.renameat2
+            fn.argtypes, fn.restype = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint], ctypes.c_int
+            rc = fn(-100, s, -100, d, 0x1)                       # AT_FDCWD, RENAME_NOREPLACE
+        else:
+            return False
+    except (OSError, AttributeError, ValueError, TypeError):    # libc が開けない・関数が無い
+        return False
+    if rc == 0:
+        return True
+    if ctypes.get_errno() == errno.EEXIST:
+        raise FileExistsError("移動先にもうファイルがある(上書きしない): %s" % dst)
+    # EEXIST 以外の失敗(対応していないボリューム・src が無い・権限・別のボリューム)は、動かさずに False。このあとの os.rename が
+    # 同じ理由で止まる(手元の 5 種のボリュームで確かめた)。一時的な失敗のときは、確かめたうえでの os.rename = 前と同じ動きになる
+    return False
+
+
+def _move_file(src, dst):
+    """src を dst へ移す。dst に何かあれば動かさずに止める。src と dst が同じパスなら何もしない。"""
+    if os.path.abspath(src) == os.path.abspath(dst):
+        return
+    if os.path.lexists(dst):
+        raise FileExistsError("移動先にもうファイルがある(上書きしない): %s" % dst)
+    if not _rename_excl(src, dst):             # OS が断る改名を使えないときだけ、上の確認を頼りに動かす
+        os.rename(src, dst)
+
+
+def _stopped(what, n):
+    """動かす途中で例外が出たときに、finally の中から 1 行出す(例外そのものは、このあと上へ伝わる)。"""
+    if sys.exc_info()[0] is not None:
+        print("途中で止まった(%s): %d 件は動かして索引に書いた。残りは動かしていない" % (what, n), file=sys.stderr)
+
+
+def _backup(tag):
+    """索引を書き換える前に、今の索引を backups/ へ写す(papers-<時刻>-before-<tag>.jsonl)。同じ秒に同じ tag の退避がもうあれば、
+    時刻に _2, _3 を付けて前の退避を上書きしない(1 秒おきに動かすと、1 回目の前の索引が残らなかった)。写した先のパスを返す。"""
+    bk = os.path.join(os.path.dirname(INDEX), "backups")
+    os.makedirs(bk, exist_ok=True)
+    ts, i = time.strftime("%Y%m%d-%H%M%S"), 1
+    path = os.path.join(bk, "papers-%s-before-%s.jsonl" % (ts, tag))
+    while os.path.exists(path):
+        i += 1
+        path = os.path.join(bk, "papers-%s_%d-before-%s.jsonl" % (ts, i, tag))
+    tmp = path + ".part"                       # 写し終えてから名前を付ける(途中で失敗しても、書きかけが退避に見えない)
+    try:
+        shutil.copy2(INDEX, tmp)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
+    return path
+
+
+def _trail(prefix):
+    """動かす予定を書き残すファイルの名前(<prefix>-<時刻>.jsonl)。同じ秒にもう 1 つあれば _2, _3 を付けて、前の記録を
+    上書きしない。'.' より '_' が後ろなので、同じ秒の 9 個目までは名前の順が作った順になる(undo は名前の順で最後の 1 つを読む。
+    10 個目からは _10 が _2 の前に並ぶ)。"""
+    base = os.path.join(ROOT, "%s-%s" % (prefix, time.strftime("%Y%m%d-%H%M%S")))
+    p, i = base + ".jsonl", 2
+    while os.path.exists(p):
+        p, i = "%s_%d.jsonl" % (base, i), i + 1
+    return p
+
+
 # ---------- 索引とキャッシュの書き込み ----------
 # 直接 open(path, "w") で上書きすると、書き込み中に落ちたとき旧版も新版も失う。
 # 一時ファイルに書き切って fsync してから os.replace で差し替える。
@@ -763,9 +857,7 @@ def scan(root=None):
                          "動かしたのではないなら papers scan ... --force" % (len(got) + len(amb), (got or amb)[0][0]["filename"]))
     if again:                                   # 取り直す記録は先に外す(同じパスの行を 2 つにしない)
         recs, stamp = load_index()
-        bk = os.path.join(os.path.dirname(INDEX), "backups")
-        os.makedirs(bk, exist_ok=True)
-        shutil.copy2(INDEX, os.path.join(bk, "papers-%s-before-retry.jsonl" % time.strftime("%Y%m%d-%H%M%S")))
+        _backup("retry")
         save_index([r for r in recs if r["path"] not in again], stamp)
     with open(INDEX, "a") as out:
         for i, p in enumerate(files):
@@ -815,9 +907,7 @@ def add():
     before = {r["path"] for r in recs if not retryable(r)}     # 前回取れなかった記録は、新しい PDF と同じに扱う
     if _new_pdfs(root, before):
         if recs:
-            bk = os.path.join(os.path.dirname(INDEX), "backups")
-            os.makedirs(bk, exist_ok=True)
-            shutil.copy2(INDEX, os.path.join(bk, "papers-%s-before-add.jsonl" % time.strftime("%Y%m%d-%H%M%S")))
+            _backup("add")
         scan(root)
         try:
             enrich()
@@ -944,19 +1034,27 @@ def rename():
     recs, stamp = load_index()
     ok = [r for r in recs if renamable(r) and not moved_aside(r)]
     skipped = [r for r in recs if r not in ok]
+    # ファイルの無い記録は改名しない。その記録のパスは「使われている」に入れる: 空いて見えるので、別の記録がその名前へ改名されると、
+    # 続けてこの記録の改名が「その名前にあるファイル」(別の記録の PDF)を動かし、PDF と書誌が入れ替わる
+    gone = [r for r in ok if not os.path.exists(r["path"])]
+    ok = [r for r in ok if os.path.exists(r["path"])]
 
-
-    plan, seen = [], set()
+    plan, seen = [], {_same_name(r["path"]) for r in recs if not os.path.exists(r["path"])}
+    for r in ok:                                   # もう正しい名前の記録の名前は、先に「使われている」に入れる。入れないと、
+        if safe(filename_for(r)) + ".pdf" == r["filename"]:      # 大小文字を区別するボリュームで、_2 付きの記録がその名前へ戻ろうとする
+            seen.add(_same_name(r["path"]))
     for r in ok:
         target = safe(filename_for(r)) + ".pdf"
         dst = os.path.join(r["folder"], target)
         if target == r["filename"]:
             continue                               # idempotent: already correct
         i = 2
-        while dst in seen or (os.path.exists(dst) and os.path.abspath(dst) != os.path.abspath(r["path"])):
+        while _same_name(dst) in seen or _occupied(dst, r["path"]):
             dst = os.path.join(r["folder"], safe(filename_for(r)) + "_%d.pdf" % i)
             i += 1
-        seen.add(dst)
+        seen.add(_same_name(dst))
+        if dst == r["path"]:
+            continue                               # もう _2 付きの名前になっている(動かすものは無い)
         plan.append({"from": r["path"], "to": dst, "doi": r.get("doi"), "rung": r["rung"]})
 
     with open(os.path.join(ROOT, "unresolved.txt"), "w") as f:
@@ -965,36 +1063,43 @@ def rename():
     if not apply:
         for p in plan[:40]:
             print("  %s\n->%s" % (os.path.basename(p["from"]), os.path.basename(p["to"])))
-        print("\n%d rename / %d 変更不要 / %d 触れない\nDRY RUN. 実行するには --apply"
-              % (len(plan), len(ok) - len(plan), len(skipped)))
+        print("\n%d rename / %d 変更不要 / %d 触れない%s\nDRY RUN. 実行するには --apply"
+              % (len(plan), len(ok) - len(plan), len(skipped),
+                 " / ファイルが無いので改名しない %d(papers relocate)" % len(gone) if gone else ""))
         return
-    trail = os.path.join(ROOT, "renames-%s.jsonl" % time.strftime("%Y%m%d-%H%M%S"))
-    with open(trail, "w") as f:                    # --apply のときだけ。written BEFORE any mv
-        for p in plan:
-            f.write(json.dumps(p, ensure_ascii=False) + "\n")
+    if plan:                                       # 空の記録は書かない(書くと、直前の move・nonpaper を undo で戻せなくなる)
+        _backup("rename")
+        trail = _trail("renames")
+        with open(trail, "w") as f:                # --apply のときだけ。written BEFORE any mv
+            for p in plan:
+                f.write(json.dumps(p, ensure_ascii=False) + "\n")
     with open(os.path.join(ROOT, "unresolved.txt"), "w") as f:
         for r in skipped:
             f.write("%s\t%s\n" % (r.get("rung"), r["path"]))
 
     for p in plan[:40]:
         print("  %s\n->%s" % (os.path.basename(p["from"]), os.path.basename(p["to"])))
-    print("\n%d rename / %d 変更不要 / %d 触れない(unresolved.txt)" %
-          (len(plan), len(ok) - len(plan), len(skipped)))
+    print("\n%d rename / %d 変更不要 / %d 触れない(unresolved.txt)%s" %
+          (len(plan), len(ok) - len(plan), len(skipped),
+           " / ファイルが無いので改名しない %d(papers relocate)" % len(gone) if gone else ""))
     moved = {}
-    for p in plan:
-        if not os.path.exists(p["from"]):          # already moved by an earlier run
-            continue
-        os.rename(p["from"], p["to"])
-        moved[p["from"]] = p["to"]
-    if moved:                                      # keep the index truthful, or the next
-        recs2 = []                                 # rename run plans from dead paths
-        for r in recs:
-            if r["path"] in moved:
-                r["path"] = moved[r["path"]]
-                r["filename"] = os.path.basename(r["path"])
-            recs2.append(r)
-        repoint(recs2, moved)
-        save_index(recs2, stamp)
+    try:
+        for p in plan:
+            if not os.path.exists(p["from"]):      # already moved by an earlier run
+                continue
+            _move_file(p["from"], p["to"])
+            moved[p["from"]] = p["to"]
+    finally:                                       # 途中で止まっても、動かした分は索引に書く
+        if moved:                                  # keep the index truthful, or the next
+            recs2 = []                             # rename run plans from dead paths
+            for r in recs:
+                if r["path"] in moved:
+                    r["path"] = moved[r["path"]]
+                    r["filename"] = os.path.basename(r["path"])
+                recs2.append(r)
+            repoint(recs2, moved)
+            save_index(recs2, stamp)
+        _stopped("rename", len(moved))
     print("done (%d moved). 復元: python3 organize.py undo" % len(moved))
 
 
@@ -1003,22 +1108,43 @@ def undo():
     trails = sorted(glob.glob(os.path.join(ROOT, "renames-*.jsonl")))
     if not trails:
         print("no rename trail"); return
-    n = 0
-    for l in open(trails[-1]):                     # most recent run only
-        p = json.loads(l)
-        if os.path.exists(p["to"]):
-            os.rename(p["to"], p["from"])
-            n += 1
-    recs, stamp = load_index()
-    back = {json.loads(l)["to"]: json.loads(l)["from"] for l in open(trails[-1])}
+    lines = [json.loads(l) for l in open(trails[-1]) if l.strip()]      # most recent run only
+    if any(os.path.exists(p["to"]) for p in lines):      # 戻すものがあるときだけ(何度打っても退避が増えない)
+        _backup("undo")
+    done, kept = set(), []
+    try:
+        for p in reversed(lines):                  # 後に動かしたものから戻す(同じファイルを 2 度動かした記録でも元へ戻る)
+            if not os.path.exists(p["to"]):
+                continue
+            if _occupied(p["from"], p["to"]):      # 元の場所に、あとから別のファイルが置かれた。上書きしない
+                kept.append(p)
+                continue
+            os.makedirs(os.path.dirname(p["from"]), exist_ok=True)       # 元のフォルダが消されていても戻す
+            _move_file(p["to"], p["from"])
+            done.add(p["to"])
+    finally:                                       # 途中で止まっても、戻した分は索引に書く
+        recs, stamp = load_index()
+        # 索引を戻すのは、ファイルがもう移動先に無いものだけ(今戻した・前に戻した)。戻せなかったものは今の場所を指したままにする
+        # 前に戻したものは、移動先に無く、元の場所にある。どちらにも無い(置き場が見えない・消された)ものは、索引を戻さない
+        back = {p["to"]: p["from"] for p in lines
+                if p["to"] in done or (not os.path.exists(p["to"]) and os.path.exists(p["from"]))}
+        _undo_index(recs, stamp, back)
+        _stopped("undo", len(done))
+    if kept:
+        print("戻さなかった %d 件(元の場所に別のファイルがある。今の場所に残した):" % len(kept))
+    for p in kept[:10]:
+        print("  %s" % p["to"])
+    print("reverted %d 件 (%s)" % (len(done), os.path.basename(trails[-1])))
+
+
+def _undo_index(recs, stamp, back):
     for r in recs:
         if r["path"] in back:
-            r["path"] = back[r["path"]]
+            r["path"] = back[r["path"]]             # 1 段だけ。記録の A→B と B→C は、別々の記録の移動(たどると 2 件が同じパスになる)
             r["filename"] = os.path.basename(r["path"])
             r["folder"] = os.path.dirname(r["path"])      # move・nonpaper はフォルダも変える。戻さないと記録の中で食い違う
     repoint(recs, back)
     save_index(recs, stamp)
-    print("reverted %d 件 (%s)" % (n, os.path.basename(trails[-1])))
 
 
 
@@ -1191,6 +1317,7 @@ def merge():
             if r["path"] in manuscript:
                 r["version_note"] = "manuscript"
             hit += 1
+    _backup("merge")
     save_index(recs, stamp)
     print("%d 件を索引に反映(うち原稿 %d)、候補を違うとした %d 件、論文ではないとした %d 件"
           % (hit, sum(1 for r in recs if r["path"] in manuscript and r["path"] in by_path), len(rejected) - len(
@@ -1503,9 +1630,7 @@ def relocate():
         print("DRY RUN. 書くには --apply"); return
     if not got and not gone:
         return
-    bk = os.path.join(os.path.dirname(INDEX), "backups")
-    os.makedirs(bk, exist_ok=True)
-    shutil.copy2(INDEX, os.path.join(bk, "papers-%s-before-relocate.jsonl" % time.strftime("%Y%m%d-%H%M%S")))
+    _backup("relocate")
     moved = {}
     for r, p, _ in got:
         moved[r["path"]] = p
@@ -1673,27 +1798,29 @@ def move():
     for n in names:
         r = _one_record(recs, n)
         new = os.path.join(dest, r["filename"])
-        if os.path.exists(new) or new in [q for _, q in plan]:
+        if os.path.exists(new) or _same_name(new) in {_same_name(q) for _, q in plan}:
             sys.exit("移動先に同じ名前のファイルがある: %s" % new)
         plan.append((r, new))
     for r, new in plan:
         print("  %s\n→ %s" % (os.path.relpath(r["path"], root), os.path.relpath(new, root)))
     if not apply:
         print("DRY RUN. 動かすには --apply%s" % ("" if os.path.isdir(dest) else "(フォルダが無いので --mkdir も)")); return
+    _backup("move")                            # フォルダを作るより先(退避に失敗したら、何も作らずに止まる)
     if not os.path.isdir(dest):
         os.makedirs(dest)
-    bk = os.path.join(os.path.dirname(INDEX), "backups")
-    os.makedirs(bk, exist_ok=True)
-    shutil.copy2(INDEX, os.path.join(bk, "papers-%s-before-move.jsonl" % time.strftime("%Y%m%d-%H%M%S")))
-    trail = os.path.join(ROOT, "renames-%s.jsonl" % time.strftime("%Y%m%d-%H%M%S"))
+    trail = _trail("renames")
     _atomic_write(trail, [json.dumps({"from": r["path"], "to": new}, ensure_ascii=False) + "\n" for r, new in plan])
     moved = {}
-    for r, new in plan:
-        os.rename(r["path"], new)
-        moved[r["path"]] = new
-        r.update(path=new, folder=dest, filename=os.path.basename(new))
-    repoint(recs, moved)
-    save_index(recs, stamp)
+    try:
+        for r, new in plan:
+            _move_file(r["path"], new)
+            moved[r["path"]] = new
+            r.update(path=new, folder=dest, filename=os.path.basename(new))
+    finally:                                       # 途中で止まっても、動かした分は索引に書く
+        if moved:
+            repoint(recs, moved)
+            save_index(recs, stamp)
+        _stopped("move", len(moved))
     print("%d 件を動かした。戻すには papers undo。検索とビューに反映: papers index && papers views" % len(moved))
 
 
@@ -1772,7 +1899,6 @@ def nonpaper_read(text):
 def nonpaper_plan(recs, root, exists=os.path.exists):
     """種類の付いた論文以外の記録のうち、種類のフォルダにまだ無いものの移動の予定 [(記録, 移動先)] と、ファイルが無くて
     飛ばした記録。同じ名前があれば _2, _3 を付ける(中身が同じでも消さない)。"""
-    same = lambda p: unicodedata.normalize("NFC", p).casefold()      # 大小文字・合成/分解だけが違う名前は、同じファイルになる
     plan, gone, taken = [], [], set()
     for r in recs:
         folder = KINDS.get(r.get("kind"), (None, None))[1]
@@ -1786,9 +1912,9 @@ def nonpaper_plan(recs, root, exists=os.path.exists):
             continue
         stem, ext = os.path.splitext(r["filename"])
         new, i = os.path.join(dest, r["filename"]), 2
-        while same(new) in taken or exists(new):
+        while _same_name(new) in taken or exists(new):          # 大小文字・合成/分解だけが違う名前も同じ名前
             new, i = os.path.join(dest, "%s_%d%s" % (stem, i, ext)), i + 1
-        taken.add(same(new))
+        taken.add(_same_name(new))
         plan.append((r, new))
     return plan, gone
 
@@ -1813,9 +1939,7 @@ def nonpaper_page():
         if i % 100 == 0:
             print("  頁数 %d/%d" % (i, len(todo)), file=sys.stderr)
     if got:
-        bk = os.path.join(os.path.dirname(INDEX), "backups")
-        os.makedirs(bk, exist_ok=True)
-        shutil.copy2(INDEX, os.path.join(bk, "papers-%s-before-nonpaper-page.jsonl" % time.strftime("%Y%m%d-%H%M%S")))
+        _backup("nonpaper-page")
         save_index(recs, stamp)
     root = os.path.commonpath([r["folder"] for r in recs])
     rows = [{"path": r["path"], "file": r["filename"], "folder": os.path.relpath(r["folder"], root), "pages": r["n_pages"],
@@ -1849,9 +1973,7 @@ def nonpaper_ok():
     if unknown or bad:
         sys.exit("書かなかった。索引に無いパス %d 件%s、知らない種類 %s(使えるのは %s)"
                  % (len(unknown), "(例: %s)" % unknown[0] if unknown else "", sorted(set(bad)), " ".join(v[0] for v in KINDS.values())))
-    bk = os.path.join(os.path.dirname(INDEX), "backups")
-    os.makedirs(bk, exist_ok=True)
-    shutil.copy2(INDEX, os.path.join(bk, "papers-%s-before-nonpaper-ok.jsonl" % time.strftime("%Y%m%d-%H%M%S")))
+    _backup("nonpaper-ok")
     save_index(recs, stamp)
     print("論文以外 %d 件・論文として残す %d 件を書いた%s。移動の予定: papers nonpaper"
           % (n, keep, "(同定済みの %d 件には書かなかった)" % skipped if skipped else ""))
@@ -1882,18 +2004,14 @@ def nonpaper():
     if not apply:
         print("%d 件を %s の下へ。DRY RUN. 動かすには --apply" % (len(plan), os.path.join(root, NONPAPER_DIR)))
         return
-    bk = os.path.join(os.path.dirname(INDEX), "backups")
-    os.makedirs(bk, exist_ok=True)
-    shutil.copy2(INDEX, os.path.join(bk, "papers-%s-before-nonpaper.jsonl" % time.strftime("%Y%m%d-%H%M%S")))
-    trail = os.path.join(ROOT, "renames-%s.jsonl" % time.strftime("%Y%m%d-%H%M%S"))
+    _backup("nonpaper")
+    trail = _trail("renames")
     _atomic_write(trail, [json.dumps({"from": r["path"], "to": new}, ensure_ascii=False) + "\n" for r, new in plan])   # 動かす前に
     moved = {}
     try:
         for r, new in plan:
             os.makedirs(os.path.dirname(new), exist_ok=True)
-            if os.path.exists(new):            # 予定のあとに現れた・予定が見分けられなかった同名。os.rename は黙って上書きする
-                raise FileExistsError("移動先にもうファイルがある: %s" % new)
-            os.rename(r["path"], new)
+            _move_file(r["path"], new)         # 予定のあとに現れた・予定が見分けられなかった同名は、上書きせずに止まる
             moved[r["path"]] = new
             r.update(path=new, folder=os.path.dirname(new), filename=os.path.basename(new))
     finally:                                   # 途中で止まっても、動かした分は索引に書く(書かないと、索引が無いパスを指す)
@@ -1941,9 +2059,7 @@ def fix():
             print("  %-14s %s → %s" % (k, str(r.get(k))[:60], str(new.get(k))[:60]))
     if "--apply" not in args:
         print("DRY RUN. 書くには --apply"); return
-    bk = os.path.join(os.path.dirname(INDEX), "backups")
-    os.makedirs(bk, exist_ok=True)
-    shutil.copy2(INDEX, os.path.join(bk, "papers-%s-before-fix.jsonl" % time.strftime("%Y%m%d-%H%M%S")))
+    _backup("fix")
     r.clear(); r.update(new)
     save_index(recs, stamp)
     print("書いた。ファイル名と検索に反映: python3 organize.py rename --apply && python3 organize.py index")
@@ -2019,6 +2135,7 @@ def pubver_merge():
             r["published_doi_rejected"] = (r.get("published_doi_rejected") or []) + [x[3]]; n += 1
         else:
             other += 1
+    _backup("pubver")
     save_index(recs, stamp)
     print("出版版 %d 件、違う %d 件を索引に。y/n 以外の %d 行は書いていない" % (y, n, other))
 
@@ -2105,13 +2222,28 @@ def dedup():
     apply = "--apply" in sys.argv
     recs, stamp = load_index()
     keep = {l.strip() for l in open(DEDUP_KEEP) if l.strip()} if os.path.exists(DEDUP_KEEP) else set()
-    groups = collections.defaultdict(list)
+    # 同じファイルを指す記録が 2 行あっても、ファイルは 1 つ。重複とみなすと、唯一の実体を _重複文献/ へ移してしまう
+    # 同じファイルかは、リンクをたどった先の (デバイス, inode) で見る: 同じパス・リンク・大小文字だけ違うパスは同じになり、
+    # 大小文字を区別するボリュームの Paper.pdf と paper.pdf は別になる
+    def same_file(r):
+        st = os.stat(r["path"])
+        return (st.st_dev, st.st_ino)
+    groups, twice, alias = collections.defaultdict(dict), 0, collections.defaultdict(list)
     for r in recs:
         key = dedup_key(r)
         if key and os.path.exists(r["path"]) and not moved_aside(r):
-            groups[key].append(r)
-    dups = {k: v for k, v in groups.items() if len(v) > 1}
-    pairs = [(a, b) for a, b in preprint_pairs(recs) if os.path.exists(a["path"]) and os.path.exists(b["path"])]
+            f = same_file(r)
+            alias[f].append(r)
+            if f not in groups[key] or (os.path.islink(groups[key][f]["path"]) and not os.path.islink(r["path"])):
+                twice += f in groups[key]
+                groups[key][f] = r                 # 代表は実体の行(リンクの行を代表にすると、リンクだけを移す)
+            else:
+                twice += 1
+    dups = {k: list(v.values()) for k, v in groups.items() if len(v) > 1}
+    pairs = [(a, b) for a, b in preprint_pairs(recs) if os.path.exists(a["path"]) and os.path.exists(b["path"])
+             and same_file(a) != same_file(b)]
+    if twice:
+        print("同じファイルを指す記録が、ほかに %d 行ある(索引の行の重なり。1 つのファイルとして数える)" % twice)
     if not dups and not pairs:
         print("重複なし"); return
     root = os.path.commonpath([r["folder"] for r in recs])
@@ -2122,7 +2254,7 @@ def dedup():
         for r in v[1:]:
             to = os.path.join(dest, os.path.basename(r["path"]))
             i = 2
-            while to in [p["to"] for p in plan] or os.path.exists(to):
+            while _same_name(to) in {_same_name(p["to"]) for p in plan} or os.path.exists(to):
                 b, e = os.path.splitext(os.path.basename(r["path"]))
                 to = os.path.join(dest, "%s_%d%s" % (b, i, e)); i += 1
             plan.append({"from": r["path"], "to": to, "doi": k, "keep": v[0]["path"]})
@@ -2133,7 +2265,7 @@ def dedup():
             continue                                   # 同じプレプリントの重複としてすでに移す
         to = os.path.join(pdest, os.path.basename(a["path"]))
         i = 2
-        while to in [p["to"] for p in plan] or os.path.exists(to):
+        while _same_name(to) in {_same_name(p["to"]) for p in plan} or os.path.exists(to):
             base, ext = os.path.splitext(os.path.basename(a["path"]))
             to = os.path.join(pdest, "%s_%d%s" % (base, i, ext)); i += 1
         plan.append({"from": a["path"], "to": to, "doi": a["published_doi"], "keep": b["path"], "kind": "preprint"})
@@ -2156,24 +2288,35 @@ def dedup():
           % (len(dups), len(plan) - npre, dest, npre, pdest))
     if not apply:
         print("DRY RUN. 実行するには --apply"); return
+    _backup("dedup")                           # フォルダを作るより先
     for d in {os.path.dirname(p["to"]) for p in plan}:
         os.makedirs(d, exist_ok=True)
-    trail = os.path.join(ROOT, "dedup-%s.jsonl" % time.strftime("%Y%m%d-%H%M%S"))
+    trail = _trail("dedup")
     with open(trail, "w") as f:
         for p in plan:
             f.write(json.dumps(p, ensure_ascii=False) + "\n")
     moved = {}
-    for p in plan:
-        if os.path.exists(p["from"]):
-            os.rename(p["from"], p["to"])
-            moved[p["from"]] = p["to"]
-    for r in recs:
-        if r["path"] in moved:
-            r["path"] = moved[r["path"]]
-            r["folder"] = os.path.dirname(r["path"])
-            p = [p for p in plan if p["to"] == r["path"]][0]
-            r["published_copy" if p.get("kind") == "preprint" else "duplicate_of"] = p["keep"]
-    save_index(recs, stamp)
+    try:
+        for p in plan:
+            if os.path.exists(p["from"]):
+                _move_file(p["from"], p["to"])
+                moved[p["from"]] = p["to"]
+    finally:                                       # 途中で止まっても、動かした分は索引に書く
+        for old in list(moved):                    # 同じファイルを別の書き方(大小文字・リンク)で指す行も、一緒に移動先を指させる
+            rep = [r for rs in alias.values() for r in rs if r["path"] == old]
+            for rs in alias.values():
+                if rep and rep[0] in rs:
+                    for r in rs:
+                        if r["path"] != old:
+                            moved[r["path"]] = moved[old]
+        for r in recs:
+            if r["path"] in moved:
+                r["path"] = moved[r["path"]]
+                r["folder"], r["filename"] = os.path.dirname(r["path"]), os.path.basename(r["path"])   # _2 が付けば名前も変わる
+                p = [p for p in plan if p["to"] == r["path"]][0]
+                r["published_copy" if p.get("kind") == "preprint" else "duplicate_of"] = p["keep"]
+        save_index(recs, stamp)
+        _stopped("dedup", len(moved))
     print("%d 件を移動。戻すには %s を使う" % (len(moved), os.path.basename(trail)))
 
 
@@ -2966,6 +3109,8 @@ def selftest():
     assert all(v[1] for k, v in KINDS.items() if k != "paper") and len({v[0] for v in KINDS.values()}) == len(KINDS), "種類のキーかフォルダが重なる・欠ける"
     assert not {v[0] for v in KINDS.values()} & set("ujko"), "種類のキーが、ページの操作のキー(u 取り消し・j/k 次と前・o 開く)と重なる"
     assert _pages_in("Title:  x\nPages:          12\nEncrypted: no\n") == 12 and _pages_in("") is None and _pages_in(None) is None, "pdfinfo の出力から頁数を読めない"
+    assert _same_name("/L/a/Thesis.pdf") == _same_name("/L/a/thesis.pdf") and _same_name("/L/\u30ac.pdf") == _same_name("/L/\u30ab\u3099.pdf") \
+        and _same_name("/L/a.pdf") != _same_name("/L/b.pdf"), "大小文字・合成/分解だけが違う名前を、同じ名前とみなしていない"
     # 大小文字・合成/分解だけが違う名前は、置き場のボリュームでは同じファイル。_2 を付けないと 2 つ目が 1 つ目を上書きする
     C = [dict(np_, path="/L/a/Thesis.pdf", filename="Thesis.pdf"), dict(np_, path="/L/b/thesis.pdf", folder="/L/b", filename="thesis.pdf"),
          dict(np_, path="/L/a/\u30ac.pdf", filename="\u30ac.pdf"), dict(np_, path="/L/b/\u30ab\u3099.pdf", folder="/L/b", filename="\u30ab\u3099.pdf")]
