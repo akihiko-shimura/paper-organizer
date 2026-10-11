@@ -482,7 +482,7 @@ Collected from the notes above, plus items recorded only in the working notes.
 **Search**
 
 - Letters that do not decompose (`ø`, `ł`, `ß`) are not matched by their ASCII spelling; with an SQLite whose trigram tokenizer lacks `remove_diacritics`, no accent is
-- A word broken by a line break in the PDF text, and terms cut at symbols (`X-ray` searches for `ray`), are not found as one word
+- Terms cut at symbols (`X-ray` searches for `ray`) are not found as one word unless quoted. A word broken by a line break in the PDF text is found in Japanese (spaces between Japanese characters are removed before indexing), but an English word hyphenated at a line end is not
 - Paraphrases and queries in another language than the paper are not answered. Embedding search was tested on 20
   files and 8 queries only, with one general-purpose model (section 13)
 - Unresolved files do not appear in the views

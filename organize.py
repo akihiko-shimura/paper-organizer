@@ -1971,15 +1971,28 @@ COLS = ["path", "year", "doi", "first_author", "title", "authors",
 W = [0, 0, 8, 6, 10, 6, 4, 2, 3, 1]
 # 検索の索引の作り方の版。build_db の作る中身(トークナイザ・正規化・列)を変えたら上げる。古い版の papers.db は作り直す。
 # 2: 文字列を NFKC にし、アクセントを畳む(remove_diacritics)
-DB_FORMAT = "2"
+# 3: 字の間に離れて載るアクセント記号を落とす。本文・抄録・表題の仮名・漢字の間の空白を詰める。著者の欄の両端に空白を足す
+DB_FORMAT = "3"
 # アクセントを畳む trigram を知らない古い SQLite では、畳まない trigram で作る(Müller と Muller は別の語のまま)
 TOKENIZERS = ["trigram remove_diacritics 1", "trigram"]
 
 
 def _norm(s):
     """索引に入れる文字列と検索語の両方にかける正規化。全角の英数字・半角の片仮名・合字(ﬁ)・分解形(u + ¨)を
-    1 つの形にそろえる。片側だけにかけると、もう片側の形で載っている記録に当たらなくなる。"""
-    return unicodedata.normalize("NFKC", s or "")
+    1 つの形にそろえる。片側だけにかけると、もう片側の形で載っている記録に当たらなくなる。
+    字の間に離れて載るアクセント記号(古い LaTeX の PDF の Garci´a)は落とす。アクセントは索引が畳むので、無い形にそろえばよい。"""
+    return unicodedata.normalize("NFKC", _LOOSE_ACCENT.sub("", s or ""))
+
+
+def _norm_text(s):
+    """索引に入れる本文・抄録・表題にだけかける。PDF の行の折り返しは空白になって語の途中に入る(コヒー レント)ので、
+    仮名・漢字の間の空白を詰める。検索語にはかけない(検索語の空白は語の区切り)。"""
+    return _CJK_GAP.sub("", _norm(s))
+
+
+def _pad(s):
+    """著者の欄の両端に空白を足す。2 文字以下の姓を " li " の形(空白込みで trigram が引ける)で探せるようにする。"""
+    return " %s " % " ".join(_norm(s).split())
 
 
 # 語は、英数字(アクセント付きのラテン文字を含む。× ÷ は除く)の連続か、仮名・漢字(長音「ー」・踊り字「々」を含む)の連続。
@@ -1987,6 +2000,26 @@ def _norm(s):
 _ALNUM, _KANA = r'A-Za-z0-9À-ÖØ-öø-ɏ', r'ぁ-んァ-ヶー々一-龥'
 TERM = re.compile(r'[%s]{3,}|[%s]{3,}' % (_ALNUM, _KANA))
 _RUN = re.compile(r'[%s]+|[%s]+' % (_ALNUM, _KANA))
+# 字の間に 1 文字として載るアクセント記号。Unicode の離れたアクセントから 8 字(¨ ´ ` ˆ ˜ ¸ ˇ ˚)を選んだ(文字の集合は閉じているので
+# 列挙でよい: 規約 6)。¯ ˘ ˙ ˛ ˝ は入れていない: 索引の字の間に ˘ ˙ ˛ ˝ は 0 か所、¯ は fl の合字の化け(in¯uenced)で、落とすと誤り
+_LOOSE_ACCENT = re.compile(r'(?<=[^\W\d_])[\u00a8\u00b4\u0060\u02c6\u02dc\u00b8\u02c7\u02da](?=[^\W\d_])')
+_CJK_GAP = re.compile(r'(?<=[%s]) +(?=[%s])' % (_KANA, _KANA))
+# 著者の列に、2 文字以下の語をそのまま書いた条件(author:Li)。両端に空白を足した句に書き換える
+_SHORT_AUTHOR = re.compile(r'\b(authors?|first_author):([^\s"():*]{1,2})(?=[\s)]|$)')
+_QUOTED = re.compile(r'(\b[A-Za-z_]+:)?"([^"]*)"')
+
+
+def _squash_quoted(q):
+    """式の中の引用符つきの句を、索引と同じ形にする。索引は本文・抄録・表題の仮名・漢字の間の空白を詰めてあるので、
+    空白入りの句('"山田 太郎"')はそのままだと当たらない。詰めていない列(著者・誌名・フォルダ・DOI)を指す句は触らない。
+    列を指さない句は全部の列を見るので、打ったままの形と詰めた形の両方で探す。"""
+    def one(m):
+        col, body = m.group(1) or "", m.group(2)
+        sq = _CJK_GAP.sub("", body)
+        if sq == body or (col and col not in ("title:", "abstract:", "text:")):
+            return m.group(0)
+        return '%s"%s"' % (col, sq) if col else '("%s" OR "%s")' % (body, sq)
+    return _QUOTED.sub(one, q)
 
 
 def _embed(texts):
@@ -2024,10 +2057,9 @@ def build_db():
                   % (sqlite3.sqlite_version, tok, TOKENIZERS[i + 1]), file=sys.stderr)
     # path と year は照合に使わないのでそのまま(path は索引の記録を引く鍵)。ほかは検索語と同じ正規化をかける
     c.executemany("INSERT INTO p VALUES (%s)" % ",".join("?" * len(COLS)),
-                  [[r.get("path") or "", str(r.get("year") or "")] +
-                   [_norm(x) for x in (r.get("doi"), r.get("first_author"), r.get("title"),
-                                       " ".join(r.get("authors") or []), r.get("journal"),
-                                       r.get("folder"), r.get("abstract"), r.get("text"))] for r in recs])
+                  [[r.get("path") or "", str(r.get("year") or ""), _norm(r.get("doi")), _pad(r.get("first_author")),
+                    _norm_text(r.get("title")), _pad(" ".join(r.get("authors") or [])), _norm(r.get("journal")),
+                    _norm(r.get("folder")), _norm_text(r.get("abstract")), _norm_text(r.get("text"))] for r in recs])
     # ベクトルはタイトルのみ。抄録を足すと平均で薄まり精度が落ちる(§10 の測定)。
     c.execute("CREATE TABLE v (path TEXT PRIMARY KEY, vec BLOB)")
     titles = [r.get("title") or (r.get("title_guess") or "")[:120] for r in recs]
@@ -2083,12 +2115,13 @@ def _match(q):
     FTS5 の既定は AND なので概念クエリが 0 件になるため。"""
     q = _norm(q)                               # 索引と同じ形に。Finder から貼った名前は分解形(u + ¨)で、そのままだと語が切れる
     if _OPS.search(q):
-        return re.sub(r'\bauthor:', "authors:", q)
+        return re.sub(r'\bauthor:', "authors:", _squash_quoted(_SHORT_AUTHOR.sub(r'\1:" \2 "', q)))
     return " OR ".join('"%s"' % t.replace('"', '') for t in TERM.findall(q.lower()))
 
 
 def _short_terms(q):
     """演算子の式の中の 2 文字以下の語。trigram の索引では何にも当たらない(黙って 0 件になる)。"""
+    q = _SHORT_AUTHOR.sub(r'\1:" \2 "', q)       # 著者の列の短い語は _match が句に書き換えるので引ける
     words = re.sub(r'\b(AND|OR|NOT)\b|\b\w+:|[()]', " ", re.sub(r'"[^"]*"', " ", q)).split()
     quoted = [w for w in re.findall(r'"([^"]*)"', q)]
     return [w for w in words + quoted if len(w) < 3]
@@ -2156,11 +2189,21 @@ def _full_entry(i, r):
                      ["    Abstract: %s" % (r.get("abstract") or "-"), ""])
 
 
+def _listing(i, row, p):
+    """検索結果の 1 行。row は検索の索引の (年, 第一著者, 誌名, 表題)。第一著者の欄は両端に空白を足してあるので取る。"""
+    return "%2d  %-4s %-16s %-26s %s" % (i, row[0] or "-", ((row[1] or "").strip() or "-")[:16],
+                                         (row[2] or "-")[:26], (row[3] or os.path.basename(p))[:60])
+
+
 def search():
     """papers search <語> [--n=10] [--full | --json [--with-text]] [--all]
-    語は OR・部分一致。AND・OR・NOT(大文字)、"語句"、括弧、列名:(title・author・journal・doi・abstract・folder・text)
-    を書けば、その式で絞る。--all で dedup が移した重複も出す。"""
-    q = " ".join(a for a in sys.argv[2:] if not a.startswith("--"))
+    語は OR・部分一致。AND・OR・NOT(大文字)、"語句"、括弧、列名:(title・author・first_author・journal・doi・abstract・folder・text)
+    を書けば、その式で絞る。--all で dedup が移した重複も出す。
+    - 記号でつながる語は引用符で囲む(そのままだと記号で切れる): papers search '"X-ray"'   '"FT-IR" OR "FTIR"'
+    - 2 文字以下の語を語として引くには、前後の空白や記号ごと囲む: papers search '" Si "'   '" Si-"'   '"(Si)"'
+      (囲まない Si は basis のような語の一部にも当たる)
+    - 2 文字以下の姓は著者の列で引ける: papers search 'author:Li'   'first_author:Wu AND title:laser'"""
+    q = _norm(" ".join(a for a in sys.argv[2:] if not a.startswith("--")))   # 注意の判定も、式を作るのと同じ形で見る(全角のコロンなど)
     n = int(next((a.split("=")[1] for a in sys.argv if a.startswith("--n=")), "10"))
     mode = next((a.split("=")[1] for a in sys.argv if a.startswith("--mode=")), "fts")
     if not q:
@@ -2188,7 +2231,7 @@ def search():
         sys.exit("invalid search expression (%s).\n"
                  "- write AND, OR, NOT in capitals; NOT needs a term before it (laser NOT review)\n"
                  "- quote terms that contain hyphens or symbols (\"second-harmonic\")\n"
-                 "- columns: title, author, journal, doi, abstract, folder, text" % e)
+                 "- columns: title, author, first_author, journal, doi, abstract, folder, text" % e)
     paths = _visible(paths, hidden, n, "--all" in sys.argv)
     if "--json" in sys.argv or "--full" in sys.argv:
         idx = {r["path"]: r for r in map(json.loads, open(INDEX)) if r.get("path")}
@@ -2205,8 +2248,7 @@ def search():
             r = c.execute("SELECT snippet(p,%d,'[',']','…',10) FROM p " % COLS.index("text") +
                           "WHERE p MATCH ? AND path=?", (m, p)).fetchone()
             sn = (r[0] if r else "").replace("\n", " ")[:110]
-        print("%2d  %-4s %-16s %-26s %s" % (i, row[0] or "-", (row[1] or "-")[:16],
-                                            (row[2] or "-")[:26], (row[3] or os.path.basename(p))[:60]))
+        print(_listing(i, row, p))
         print("    %s" % p)
         if sn:
             print("    … %s" % sn)
@@ -2489,6 +2531,28 @@ def selftest():
     assert like("発振 制御") == ["f", "e"], "語ごとに分けていない、または含む語の多い順でない"
     assert like("制御") == ["e", "f"] and like("%") == ["c"]
     assert like("カ\u3099ス") == ["g"] and like("Ｓｉ") == ["h"], "分解形・全角の入力を索引と同じ形にしていない"
+    # 索引に入れる本文: 仮名・漢字の間の空白(行の折り返しの跡)を詰める。英字の間・英字と和文の間は詰めない。検索語にはかけない
+    assert _norm_text("スペク トル解析 と 干渉  測定") == "スペクトル解析と干渉測定", "仮名・漢字の間の空白を詰めていない"
+    assert _norm_text("\uff7d\uff8d\uff9f\uff78 \uff84\uff99") == "スペクトル", "空白を詰めるのが NFKC より先になっている(半角の片仮名の間が詰まらない)"
+    assert _norm_text("fiber laser と SHG 素子") == "fiber laser と SHG 素子", "英字の間・英字と和文の間の空白まで詰めている"
+    assert _norm("レーザー 発振") == "レーザー 発振", "検索語の空白(語の区切り)まで詰めている"
+    # 字の間に離れて載るアクセント記号は落とす(索引と検索語の両方)。字の間でなければ触らない
+    assert _norm("Garci\u00b4a M\u00a8uller fa\u02c6t") == "Garcia Muller fat", "字の間のアクセント記号を落としていない"
+    assert _norm("a\u02dcb a\u00b8b a\u02c7b a\u02dab a\u0060b") == "ab ab ab ab ab", "8 字のどれかを落としていない"
+    assert _norm("a \u0060b\u0060 c") == "a \u0060b\u0060 c" and _match("Pe\u00b4rez") == '"perez"', "字の間でない記号まで落としている"
+    # 著者の列の 2 文字以下の語は、両端に空白を足した句にする(索引の側も両端に空白を足す)。3 文字以上は部分一致のまま
+    assert _pad("Li  Wei") == " Li Wei " and _pad(None) == "  "
+    assert _listing(1, ("2020", _pad("Li"), "Optica", "T"), "/f/a.pdf").split()[:3] == ["1", "2020", "Li"] \
+        and _listing(1, ("", _pad(None), "", ""), "/f/a.pdf").split() == ["1", "-", "-", "-", "a.pdf"], "検索結果の行に、著者の欄に足した空白が出ている"
+    assert _match("author:Li") == 'authors:" Li "' and _match("first_author:Wu AND title:laser") == 'first_author:" Wu " AND title:laser'
+    assert _match("(author:Li OR authors:Xu) NOT review") == '(authors:" Li " OR authors:" Xu ") NOT review'
+    assert _match("author:Lin") == "authors:Lin" and _match('author:"Li"') == 'authors:"Li"', "3 文字以上・引用符つきの著者まで書き換えている"
+    assert _match("author:Li*") == "authors:Li*" and _match("author:a:b") == "authors:a:b", "* や : の付いた語まで句にしている"
+    # 引用符つきの句: 索引が空白を詰めた列(本文・抄録・表題)に合わせる。列を指さない句は両方の形で、詰めていない列の句はそのまま
+    assert _match('"干渉 測定"') == '("干渉 測定" OR "干渉測定")' and _match('text:"干渉 測定" NOT "fiber laser"') == 'text:"干渉測定" NOT "fiber laser"'
+    assert _match('author:"山田 太郎" OR folder:"干渉 測定"') == 'authors:"山田 太郎" OR folder:"干渉 測定"', "空白を詰めていない列の句まで詰めている"
+    assert _short_terms("author:Li AND title:laser") == [] and _short_terms("title:Si AND author:Li") == ["Si"], \
+        "引けるようになった著者の短い語に「当たらない」の注意を出している、または他の列の短い語の注意を消している"
     assert _visible(["/a", "/_dup/b", "/c"], {"/_dup/b"}, 2) == ["/a", "/c"], "移した重複を検索結果に出している"
     assert _visible(["/a", "/_dup/b"], {"/_dup/b"}, 5, show_all=True) == ["/a", "/_dup/b"]
 

@@ -125,7 +125,11 @@ papers recent --n=20        # most recently added to the index first. --json is 
     - Letters and digits, including accented Latin letters (`Müller` and `Schrödinger` are one term each)
     - Japanese kana and kanji, including the long-vowel mark 「ー」 and the iteration mark 「々」 (`レーザー`, `コヒーレント` and `様々な` are one term each)
   - Any other character (symbols, Greek letters and so on) ends a run, and so does a boundary between
-    letters/digits and Japanese characters (`X-ray` searches for `ray`, `SHG素子` searches for `SHG`)
+    letters/digits and Japanese characters (`X-ray` searches for `ray`, `SHG素子` searches for `SHG`).
+    To search with the symbol, quote the term: `papers search '"X-ray"'`. List spelling variants with OR: `'"FT-IR" OR "FTIR"'`
+  - In the text, abstract and title, spaces between Japanese characters are removed before indexing (a word that a line wrap in the PDF left as `コヒー レント`
+    is found by `コヒーレント`). An accent mark that stands alone between letters (`Garci´a` in old LaTeX PDFs) is dropped (found by `Garcia`).
+    Text snippets are shown in this form
   - Accents are ignored (`Müller` and `Muller` find the same records), except that:
     - Letters that cannot be decomposed (`ø`, `ł`, `ß`) stay distinct (`Søren` and `Soren` differ)
     - An input with no term of 3 or more characters (below) is accent-sensitive
@@ -141,7 +145,9 @@ papers recent --n=20        # most recently added to the index first. --json is 
     - Only the title and the text are searched (not authors, journal, DOI, abstract or folder name)
     - Records containing more of the terms come first (`発振 制御` lists records with both first), and the list is cut off at `--n` records.
       Relevance is not ranked beyond that. No text snippet is shown
-    - A short term also matches inside other words (`Si` matches "basis"; ASCII letters match regardless of case). A 2-letter ASCII term
+    - A short term also matches inside other words (`Si` matches "basis"; ASCII letters match regardless of case). To match it as a word,
+      quote it together with the surrounding spaces or symbols: `'" Si "'`, `'" Si-"'`, `'"(Si)"'` (3 or more characters, so the normal search finds them).
+      Only the quoted form is matched (`Si,` and `-Si` are missed; `" Si "` finds fewer than half of the records that contain the word). For full coverage, search for plain `Si` and narrow down. A 2-letter ASCII term
       matches almost every record, so this path is useful mainly for kanji and kana terms
     - `%` and `_` are searched for literally (`T_c` finds T_c, `50%` finds 50%)
 - **Of the text, only the first 3,000 characters of pages 1–2 are searched.** For most papers that ends partway down page 1 (title, authors, abstract and
@@ -172,13 +178,16 @@ If you write an operator in the query, the results are narrowed by that expressi
 - `AND`, `OR` and `NOT` are **upper case** (a lower-case `and` is treated as an ordinary term and the query becomes an OR search). `NOT` needs a term before it
 - Column names: `title`, `author` (all authors), `first_author`, `journal`, `doi`, `abstract`, `folder`, `text` (the first 3,000 characters of the text)
 - Enclose terms that contain a hyphen or a symbol in quotation marks (`"second-harmonic"`. Without them the command stops with a syntax error and shows how to fix it)
-- Terms of 2 characters or fewer (`CW`, `UV`) cannot be looked up in the index. If you put one in an expression, a warning is shown and that condition matches 0 records
+- Terms of 2 characters or fewer (`CW`, `UV`) cannot be looked up in the index. If you put one in an expression, a warning is shown and that condition matches 0 records. Two exceptions:
+  - In the author columns (`author:`, `first_author:`) a surname of 2 characters or fewer is matched as a word (`author:Li` finds Li only, not Lin or Oliver).
+    Family names and given names are not told apart
+  - A short term quoted together with the surrounding spaces or symbols is found (`'" CW "'`, `'title:"UV-"'`)
 - In the shell, enclose the whole expression in `'…'` (so that `"…"` phrases can be written inside)
 
 You can also query directly with SQL (read-only. Without `-list`, a recent sqlite3 formats the output as a table in the terminal and truncates the path):
 
 ```bash
-sqlite3 -list -separator ' | ' "<repo>/papers.db" "SELECT year, first_author, title, path FROM p WHERE p MATCH 'title:laser AND title:fiber' ORDER BY bm25(p) LIMIT 20"
+sqlite3 -list -separator ' | ' "<repo>/papers.db" "SELECT year, trim(first_author), title, path FROM p WHERE p MATCH 'title:laser AND title:fiber' ORDER BY bm25(p) LIMIT 20"
 ```
 
 ## 3. For AI agents (when searching)

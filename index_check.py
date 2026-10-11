@@ -566,7 +566,11 @@ def check_search_db(d):
     write(O.INDEX, [rec("accent", authors=["Jürgen Müller"]), rec("plain", authors=["J Muller"]),
                     rec("nfd", text="Mu\u0308ller et al."), rec("lig", text="electric \ufb01eld"),
                     rec("wide", text="\uff33\uff28\uff27\u7d20\u5b50"), rec("kana", text="\uff7a\uff8b\uff70\uff9a\uff9d\uff84\u5236\u5fa1"),
-                    rec("short", text="\uff33\uff49 \u57fa\u677f")])
+                    rec("short", text="\uff33\uff49 \u57fa\u677f"),
+                    rec("li", first_author="Li", authors=["Li Wei", "Zhang San"]), rec("lin", first_author="Lin", authors=["Lin Bo", "Oliver Kohli"]),
+                    rec("li2", first_author="Zhang", authors=["Zhang San", "\uff2c\uff49"]),
+                    rec("abs", abstract="\u5e72\u6e09 \u6e2c\u5b9a\u306e\u5831\u544a"), rec("ttl", title="\u504f\u5149 \u89e3\u6790\u306e\u624b\u6cd5"),
+                    rec("wrap", text="\u30b9\u30da\u30af \u30c8\u30eb\u89e3\u6790"), rec("loose", text="A. Garci\u00b4a and B. Pe\u00b4rez")])
     real = (O._embed, O.TOKENIZERS)
     O._embed = lambda texts: [None] * len(texts)
     quiet = contextlib.redirect_stderr(io.StringIO())
@@ -590,6 +594,13 @@ def check_search_db(d):
         assert find(c, "コヒーレント") == ["kana"], "半角の片仮名で載っている語に当たらない"
         assert find(c, "Si") == find(c, "\uff33\uff49") == ["short"], "3 文字以上の語が無い入力が、全角で載っている語に当たらない"
         assert find(c, "基板 制御") == ["kana", "short"], "3 文字以上の語が無い入力を語ごとに探していない"
+        assert find(c, "author:Li") == ["li", "li2"], "2 文字の姓を著者の列で語として引けない(Lin・Oliver・Kohli に当たる、欄の端の Li を落とす): %s" % find(c, "author:Li")
+        assert find(c, "first_author:Li") == ["li"] and find(c, "author:Lin") == ["lin"], "第一著者の列・3 文字以上の姓"
+        assert find(c, "スペクトル解析") == ["wrap"], "行の折り返しで空白が入った語に当たらない"
+        assert find(c, "干渉測定") == ["abs"] and find(c, "偏光解析") == ["ttl"], "抄録・表題の仮名・漢字の間の空白を詰めていない"
+        assert find(c, '"スペク トル解析"') == ["wrap"] and find(c, 'text:"スペク トル解析"') == ["wrap"], \
+            "空白入りの引用符つきの句が、空白を詰めた索引に当たらない"
+        assert find(c, "Garcia") == find(c, "Perez") == ["loose"], "字の間に離れて載るアクセント記号で語が切れている"
         c.close()
         for old in ("1", ""):                                # 作り方の古い索引・版の印が無い索引は、索引より新しくても作り直す
             stub_db(O.DB, old)
