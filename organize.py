@@ -831,7 +831,7 @@ def add():
     dedup()
     print("\n=== 改名(dry run。まだ改名していない記録の全部)")
     rename()
-    if not os.path.exists(DB) or os.path.getmtime(DB) < os.path.getmtime(INDEX):
+    if not _db_format_ok() or os.path.getmtime(DB) < os.path.getmtime(INDEX):
         print("\n=== 検索の索引")
         build_db()
     print("\n動かすのは利用者の承認のあと:\n"
@@ -1613,7 +1613,7 @@ def info():
          "resolved": sum(1 for r in recs if renamable(r) and not moved_aside(r)),
          "needs_human": sum(1 for r in recs if needs_human(r)), "moved_aside": sum(1 for r in recs if moved_aside(r)),
          "db": DB if dm else None, "db_updated": fmt(dm), "db_bytes": os.path.getsize(DB) if dm else None, "db_records": dn,
-         "db_stale": bool(dm is None or dm < im or dn != len(recs)),
+         "db_stale": bool(dm is None or dm < im or dn != len(recs) or not _db_format_ok()),
          "missing_files": sum(1 for r in recs if not os.path.exists(r["path"])),
          "last_rename": fmt(os.path.getmtime(ren)) if ren else None, "last_backup": bk}
     if "--json" in sys.argv:
@@ -1626,7 +1626,7 @@ def info():
     print("検索の索引    %s\n              更新 %s ・ %s ・ %s 件" % (d["db"] or "(無い)", d["db_updated"] or "-", mb(d["db_bytes"]),
                                                    d["db_records"] or 0))
     if d["db_stale"]:
-        print("              ※ 索引より古い(または件数が違う)。検索に反映するには: papers index")
+        print("              ※ 索引より古い(または件数・作り方が違う)。検索に反映するには: papers index")
     if d["missing_files"]:
         print("              ※ パスにファイルが無い記録 %d 件(手で動かした・消した)。papers relocate" % d["missing_files"])
     print("最後の改名    %s" % (d["last_rename"] or "-"))
@@ -1969,7 +1969,24 @@ COLS = ["path", "year", "doi", "first_author", "title", "authors",
         "journal", "folder", "abstract", "text"]
 # bm25 は全列に重みが要る(UNINDEXED 列の分も)。text はページ1なのでタイトルを再掲する → 低く。
 W = [0, 0, 8, 6, 10, 6, 4, 2, 3, 1]
-TERM = re.compile(r'[A-Za-z0-9]{3,}|[ぁ-んァ-ヶ一-龥]{3,}')
+# 検索の索引の作り方の版。build_db の作る中身(トークナイザ・正規化・列)を変えたら上げる。古い版の papers.db は作り直す。
+# 2: 文字列を NFKC にし、アクセントを畳む(remove_diacritics)
+DB_FORMAT = "2"
+# アクセントを畳む trigram を知らない古い SQLite では、畳まない trigram で作る(Müller と Muller は別の語のまま)
+TOKENIZERS = ["trigram remove_diacritics 1", "trigram"]
+
+
+def _norm(s):
+    """索引に入れる文字列と検索語の両方にかける正規化。全角の英数字・半角の片仮名・合字(ﬁ)・分解形(u + ¨)を
+    1 つの形にそろえる。片側だけにかけると、もう片側の形で載っている記録に当たらなくなる。"""
+    return unicodedata.normalize("NFKC", s or "")
+
+
+# 語は、英数字(アクセント付きのラテン文字を含む。× ÷ は除く)の連続か、仮名・漢字(長音「ー」・踊り字「々」を含む)の連続。
+# 3 文字以上を索引(trigram)で引く。2 つの文字種の境目では切る(繋げると 'SHG素子' が "shg" の 162 件から 0 件になる)。
+_ALNUM, _KANA = r'A-Za-z0-9À-ÖØ-öø-ɏ', r'ぁ-んァ-ヶー々一-龥'
+TERM = re.compile(r'[%s]{3,}|[%s]{3,}' % (_ALNUM, _KANA))
+_RUN = re.compile(r'[%s]+|[%s]+' % (_ALNUM, _KANA))
 
 
 def _embed(texts):
@@ -1995,14 +2012,22 @@ def build_db():
     if os.path.exists(DB):
         os.remove(DB)
     c = sqlite3.connect(DB)
-    c.execute("CREATE VIRTUAL TABLE p USING fts5(%s, tokenize='trigram')" %
-              ", ".join(x + " UNINDEXED" if x in ("path", "year") else x for x in COLS))
+    for i, tok in enumerate(TOKENIZERS):
+        try:
+            c.execute("CREATE VIRTUAL TABLE p USING fts5(%s, tokenize='%s')" %
+                      (", ".join(x + " UNINDEXED" if x in ("path", "year") else x for x in COLS), tok))
+            break
+        except sqlite3.OperationalError:           # この SQLite が知らないトークナイザ。最後の候補でも駄目ならそのまま落とす
+            if i == len(TOKENIZERS) - 1:
+                raise
+            print("note: this SQLite (%s) does not support tokenizer '%s'; using '%s'"
+                  % (sqlite3.sqlite_version, tok, TOKENIZERS[i + 1]), file=sys.stderr)
+    # path と year は照合に使わないのでそのまま(path は索引の記録を引く鍵)。ほかは検索語と同じ正規化をかける
     c.executemany("INSERT INTO p VALUES (%s)" % ",".join("?" * len(COLS)),
-                  [[r.get("path") or "", str(r.get("year") or ""), r.get("doi") or "",
-                    r.get("first_author") or "", r.get("title") or "",
-                    " ".join(r.get("authors") or []), r.get("journal") or "",
-                    r.get("folder") or "", r.get("abstract") or "",
-                    r.get("text") or ""] for r in recs])
+                  [[r.get("path") or "", str(r.get("year") or "")] +
+                   [_norm(x) for x in (r.get("doi"), r.get("first_author"), r.get("title"),
+                                       " ".join(r.get("authors") or []), r.get("journal"),
+                                       r.get("folder"), r.get("abstract"), r.get("text"))] for r in recs])
     # ベクトルはタイトルのみ。抄録を足すと平均で薄まり精度が落ちる(§10 の測定)。
     c.execute("CREATE TABLE v (path TEXT PRIMARY KEY, vec BLOB)")
     titles = [r.get("title") or (r.get("title_guess") or "")[:120] for r in recs]
@@ -2012,15 +2037,30 @@ def build_db():
                       (r["path"], array.array("f", v).tobytes()))
     c.execute("CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT)")
     c.execute("INSERT INTO meta VALUES ('mtime',?)", (str(os.path.getmtime(INDEX)),))
+    c.execute("INSERT INTO meta VALUES ('format',?)", (DB_FORMAT,))
     c.commit()
     print("papers.db: %d 件 (ベクトル %d)" %
           (len(recs), c.execute("SELECT count(*) FROM v").fetchone()[0]), file=sys.stderr)
     return c
 
 
-def _db():
+def _db_format_ok():
+    """papers.db が今の作り方(DB_FORMAT)で作られているか。検索語は今の正規化で作るので、古い作り方の索引に当てると
+    全角や合字で載っている記録を取りこぼす。無い・読めない・版の印が無いは偽。"""
     if not os.path.exists(DB):
-        return build_db()
+        return False
+    try:
+        c = sqlite3.connect(DB)
+        m = c.execute("SELECT v FROM meta WHERE k='format'").fetchone()
+        c.close()
+    except sqlite3.Error:
+        return False
+    return bool(m) and m[0] == DB_FORMAT
+
+
+def _db():
+    if not _db_format_ok():
+        return build_db()                      # 無い、または作り方が古い
     c = sqlite3.connect(DB)
     try:
         m = c.execute("SELECT v FROM meta WHERE k='mtime'").fetchone()
@@ -2041,6 +2081,7 @@ def _match(q):
     演算子(大文字の AND・OR・NOT、引用符、括弧、列名:)があれば、利用者の書いた式をそのまま使う(author: は authors:)。
     無ければ語に分けて引用し OR で繋ぐ。生の文字列は MATCH に渡せず('second-harmonic' は構文エラー)、
     FTS5 の既定は AND なので概念クエリが 0 件になるため。"""
+    q = _norm(q)                               # 索引と同じ形に。Finder から貼った名前は分解形(u + ¨)で、そのままだと語が切れる
     if _OPS.search(q):
         return re.sub(r'\bauthor:', "authors:", q)
     return " OR ".join('"%s"' % t.replace('"', '') for t in TERM.findall(q.lower()))
@@ -2053,6 +2094,23 @@ def _short_terms(q):
     return [w for w in words + quoted if len(w) < 3]
 
 
+def _unused_terms(q):
+    """演算子の無い入力で、3 文字以上の語と一緒に書かれて使われなかった 2 文字以下の語('レーザー 発振' の 発振)。
+    3 文字以上の語が 1 つも無ければ _like が入力の全部を使うので、空。"""
+    if _OPS.search(q) or not _match(q):
+        return []
+    return [t for t in _RUN.findall(_norm(q)) if len(t) < 3]
+
+
+def _like(q):
+    """3 文字以上の語が無い入力(trigram が索引できない)を、表題と本文の部分一致で探す SQL と引数。
+    空白で分けた語のどれかを含む記録を、含む語の多い順に返す。% と _ は文字として探す。"""
+    pats = ["%" + re.sub(r'([\\%_])', r'\\\1', t) + "%" for t in _norm(q).split()]
+    hit = " + ".join(["(title LIKE ? ESCAPE '\\' OR text LIKE ? ESCAPE '\\')"] * len(pats)) or "0"
+    return ("SELECT path FROM p WHERE %s > 0 ORDER BY %s DESC, rowid LIMIT ?" % (hit, hit),
+            [p for p in pats for _ in range(2)] * 2)
+
+
 def _visible(paths, hidden, n, show_all=False):
     """検索結果から、dedup が移した重複(利用者が消す予定のもの)を外して n 件に。--all なら外さない。"""
     return (paths if show_all else [p for p in paths if p not in hidden])[:n]
@@ -2061,9 +2119,8 @@ def _visible(paths, hidden, n, show_all=False):
 def _fts(c, q, n):
     m = _match(q)
     if not m:                                  # 2文字以下(trigram が索引できない)
-        rows = c.execute("SELECT path FROM p WHERE title LIKE ? OR text LIKE ? LIMIT ?",
-                         ("%" + q + "%", "%" + q + "%", n)).fetchall()
-        return [r[0] for r in rows]
+        sql, args = _like(q)
+        return [r[0] for r in c.execute(sql, args + [n]).fetchall()]
     w = ",".join(str(x) for x in W)
     rows = c.execute("SELECT path FROM p WHERE p MATCH ? ORDER BY bm25(p,%s) LIMIT ?" % w,
                      (m, n)).fetchall()         # bm25 は昇順(小さいほど良い)
@@ -2109,8 +2166,10 @@ def search():
     if not q:
         sys.exit(search.__doc__)
     if _OPS.search(q) and _short_terms(q):
-        print("注意: 2 文字以下の語は索引で引けないので、その語の条件は 0 件になる: %s" % ", ".join(_short_terms(q)),
-              file=sys.stderr)
+        print("note: terms shorter than 3 characters cannot be matched by the index, so their conditions match nothing: %s"
+              % ", ".join(_short_terms(q)), file=sys.stderr)
+    if _unused_terms(q):
+        print("note: terms shorter than 3 characters were not used: %s" % ", ".join(_unused_terms(q)), file=sys.stderr)
     hidden = {r["path"] for r in map(json.loads, open(INDEX)) if moved_aside(r)}
     k = n if "--all" in sys.argv else n + len(hidden)          # 外す分を見込んで多めに引く
     c = _db()
@@ -2126,10 +2185,10 @@ def search():
         else:
             paths = _fts(c, q, k)
     except sqlite3.OperationalError as e:
-        sys.exit("検索式の書き方が違う(%s)。\n"
-                 "- AND・OR・NOT は大文字で、NOT の前には語が要る(laser NOT review)\n"
-                 "- ハイフンや記号を含む語は引用符で囲む(\"second-harmonic\")\n"
-                 "- 列名は title・author・journal・doi・abstract・folder・text" % e)
+        sys.exit("invalid search expression (%s).\n"
+                 "- write AND, OR, NOT in capitals; NOT needs a term before it (laser NOT review)\n"
+                 "- quote terms that contain hyphens or symbols (\"second-harmonic\")\n"
+                 "- columns: title, author, journal, doi, abstract, folder, text" % e)
     paths = _visible(paths, hidden, n, "--all" in sys.argv)
     if "--json" in sys.argv or "--full" in sys.argv:
         idx = {r["path"]: r for r in map(json.loads, open(INDEX)) if r.get("path")}
@@ -2407,6 +2466,29 @@ def selftest():
     assert _match("title:laser AND fiber NOT review") == "title:laser AND fiber NOT review"
     assert _match('author:Smith "second harmonic"') == 'authors:Smith "second harmonic"'
     assert _short_terms("title:laser AND CW") == ["CW"] and _short_terms('"CEP" OR title:laser') == []
+    # 語の切り方: 長音・踊り字・アクセント付きのラテン文字は語の中。文字種の境目と記号では切る
+    assert _match("レーザー 発振") == '"レーザー"' and _match("コヒーレント") == '"コヒーレント"', "長音「ー」で語を切っている"
+    assert _match("様々な") == '"様々な"', "踊り字「々」で語を切っている"
+    assert _match("Müller Schrödinger") == '"müller" OR "schrödinger"', "アクセント付きの文字で語を切っている"
+    assert _match("Mu\u0308ller") == '"müller"' and _match("author:Mu\u0308ller") == "authors:Müller", \
+        "分解形(u + ¨)の入力を合成形にしていない"
+    assert _match("3×3×3") == "", "× を文字として数えている"
+    assert _match("ＳＨＧ ﬁber ｺﾋｰﾚﾝﾄ") == '"shg" OR "fiber" OR "コヒーレント"', "全角・合字・半角の片仮名を索引と同じ形にしていない"
+    assert _match("SHG素子") == '"shg"' and _match("X-ray") == '"ray"', "文字種の境目・記号で切っていない"
+    assert _unused_terms("レーザー 発振") == ["発振"] and _unused_terms("SHG素子") == ["素子"] and _unused_terms("X-ray") == ["X"]
+    assert _unused_terms("レーザー カ\u3099ス") == ["ガス"], "分解形の入力を合成形にしていない"
+    assert _unused_terms("Si Ge") == [] and _unused_terms("title:laser AND CW") == [], "LIKE の経路・演算子の式で注意を出している"
+    # 3 文字以上の語が無い入力: % と _ は文字として、語ごとに探し、含む語の多い順
+    lk = sqlite3.connect(":memory:")
+    lk.execute("CREATE TABLE p (path, title, text)")
+    lk.executemany("INSERT INTO p VALUES (?,?,?)", [("a", "T_c of films", ""), ("b", "", "Tc and T1c"), ("c", "", "50% yield"),
+                                                    ("d", "", "500 samples"), ("e", "", "制御のみ"), ("f", "発振", "発振と制御"),
+                                                    ("g", "", "ガス"), ("h", "Si", "")])
+    like = lambda q: [r[0] for r in lk.execute(_like(q)[0], _like(q)[1] + [10])]
+    assert like("T_c") == ["a"] and like("50%") == ["c"], "LIKE の % と _ がワイルドカードのまま"
+    assert like("発振 制御") == ["f", "e"], "語ごとに分けていない、または含む語の多い順でない"
+    assert like("制御") == ["e", "f"] and like("%") == ["c"]
+    assert like("カ\u3099ス") == ["g"] and like("Ｓｉ") == ["h"], "分解形・全角の入力を索引と同じ形にしていない"
     assert _visible(["/a", "/_dup/b", "/c"], {"/_dup/b"}, 2) == ["/a", "/c"], "移した重複を検索結果に出している"
     assert _visible(["/a", "/_dup/b"], {"/_dup/b"}, 5, show_all=True) == ["/a", "/_dup/b"]
 

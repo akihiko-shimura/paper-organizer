@@ -265,14 +265,27 @@ def check_link(d):
     print("H ok: リンク経由でも ROOT は本体。索引が無ければ最初の手順を出して止まる")
 
 
+def stub_db(path, fmt=None):
+    """検索の索引の代わり(Swift も FTS5 も使わない)。版の印だけ本物と同じ形で持つ。fmt="" なら印の無い古い索引。"""
+    import sqlite3
+    if os.path.exists(path):
+        os.remove(path)
+    c = sqlite3.connect(path)
+    c.execute("CREATE TABLE p (path)"); c.execute("INSERT INTO p VALUES ('/f/a.pdf')")
+    c.execute("CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT)")
+    c.execute("INSERT INTO meta VALUES ('mtime','9e99')")     # 索引より新しい。作り直す理由を版だけにする
+    if fmt != "":
+        c.execute("INSERT INTO meta VALUES ('format',?)", (O.DB_FORMAT if fmt is None else fmt,))
+    c.commit(); c.close()
+
+
 def check_info(d):
     """I. info の db_stale: 索引の方が新しければ真、古ければ(件数が同じなら)偽。一時ディレクトリの小さな索引と
     検索の索引で見る(本物のデータに頼ると、それが無い CI や mutate.py の複製で素通りする)。"""
-    import contextlib, io, sqlite3
+    import contextlib, io
     O.INDEX, O.DB = os.path.join(d, "info.jsonl"), os.path.join(d, "info.db")
     write(O.INDEX, [{"path": "/f/a.pdf", "folder": "/f", "rung": "unresolved"}])
-    c = sqlite3.connect(O.DB); c.execute("CREATE TABLE p (path)"); c.execute("INSERT INTO p VALUES ('/f/a.pdf')")
-    c.commit(); c.close()
+    stub_db(O.DB)
     def run():
         O.sys.argv = ["organize.py", "info", "--json"]
         out = io.StringIO()
@@ -284,7 +297,11 @@ def check_info(d):
     assert run()["db_stale"], "索引の方が新しいのに、検索の索引が古いと言わない"
     os.utime(O.INDEX, (dm - 60, dm - 60))
     assert not run()["db_stale"], "検索の索引の方が新しく件数も同じなのに古いと言う"
-    print("I ok: 検索の索引が古いときだけ古いと言う")
+    for old in ("1", ""):                                   # 作り方の版が違う・版の印が無い(この変更より前の索引)
+        stub_db(O.DB, old)
+        os.utime(O.INDEX, (dm - 60, dm - 60))
+        assert run()["db_stale"], "作り方の古い検索の索引(版 %r)を古いと言わない" % old
+    print("I ok: 検索の索引が古いとき・作り方が違うときだけ古いと言う")
 
 
 def check_rename_pointers(d):
@@ -445,7 +462,7 @@ def check_add(d):
     O.resolve = lambda p: calls.append("resolve") or dict(base, path=p, folder=lib, filename=os.path.basename(p), year=2020,
                                                           doi="10.1/n", title="New", text="New paper")
     O.enrich = lambda: calls.append("enrich")
-    O.build_db = lambda: calls.append("index") or open(O.DB, "w").close()
+    O.build_db = lambda: calls.append("index") or stub_db(O.DB)
     def run(*args):
         O.sys.argv = ["organize.py", "add"] + list(args)
         out = io.StringIO()
@@ -471,6 +488,9 @@ def check_add(d):
         out = run(lib)                                       # 2 回目: 新しい PDF は無い
         assert "新しい PDF は無い" in out and calls == ["resolve", "enrich", "index"], "新しい PDF が無いのに同定・索引をやり直した"
         assert len(backups()) == 1, "新しい PDF が無いのに退避した"
+        stub_db(O.DB, "1")                                   # 作り方の古い検索の索引は、新しい PDF が無くても作り直す
+        run(lib)
+        assert calls == ["resolve", "enrich", "index", "index"], "作り方の古い検索の索引を作り直さない: %s" % calls
         open(os.path.join(lib, "new2.pdf"), "w").write("%PDF")   # 3 回目: 抄録の取得が中断しても、報告と予定は出す
         def abort():
             raise SystemExit(1)
@@ -537,6 +557,72 @@ def check_retry(d):
     print("P ok: 取れなかった記録だけを取り直す、行を増やさない、外す前に退避する、取れたら新しい記録として報告する")
 
 
+def check_search_db(d):
+    """Q. 検索の索引を実際に作って引く(ベクトルは差し替える。Swift が要らない)。索引に入れる文字列と検索語に同じ正規化が
+    かかっていること、作り方の古い索引を作り直すこと、トークナイザが使えない SQLite でも索引が作れることを見る。"""
+    import contextlib, io, sqlite3
+    O.ROOT, O.INDEX, O.DB = d, os.path.join(d, "s.jsonl"), os.path.join(d, "s.db")
+    rec = lambda name, **kw: dict({"path": "/f/%s.pdf" % name, "folder": "/f", "rung": "unresolved"}, **kw)
+    write(O.INDEX, [rec("accent", authors=["Jürgen Müller"]), rec("plain", authors=["J Muller"]),
+                    rec("nfd", text="Mu\u0308ller et al."), rec("lig", text="electric \ufb01eld"),
+                    rec("wide", text="\uff33\uff28\uff27\u7d20\u5b50"), rec("kana", text="\uff7a\uff8b\uff70\uff9a\uff9d\uff84\u5236\u5fa1"),
+                    rec("short", text="\uff33\uff49 \u57fa\u677f")])
+    real = (O._embed, O.TOKENIZERS)
+    O._embed = lambda texts: [None] * len(texts)
+    quiet = contextlib.redirect_stderr(io.StringIO())
+    find = lambda c, q: sorted(os.path.basename(p)[:-4] for p in O._fts(c, q, 10))
+    try:
+        with quiet:
+            c = O._db()
+        assert O._db_format_ok(), "作った検索の索引に、作り方の版の印が無い(検索のたびに作り直すことになる)"
+        try:                                                 # この SQLite の trigram がアクセントを畳めるか(古い版は畳めない)
+            sqlite3.connect(":memory:").execute("CREATE VIRTUAL TABLE t USING fts5(x, tokenize='trigram remove_diacritics 1')")
+            folds = True
+        except sqlite3.OperationalError:
+            folds = False
+        if folds:
+            assert find(c, "Müller") == find(c, "Muller") == ["accent", "nfd", "plain"], \
+                "アクセントの有無で別の語になっている: %s / %s" % (find(c, "Müller"), find(c, "Muller"))
+        else:
+            assert find(c, "Müller") == ["accent", "nfd"], "合成形と分解形が別の語になっている: %s" % find(c, "Müller")
+        assert find(c, "field") == ["lig"], "合字(ﬁ)で載っている語に当たらない"
+        assert find(c, "SHG") == find(c, "\uff33\uff28\uff27") == ["wide"], "全角の英数字で載っている語に当たらない"
+        assert find(c, "コヒーレント") == ["kana"], "半角の片仮名で載っている語に当たらない"
+        assert find(c, "Si") == find(c, "\uff33\uff49") == ["short"], "3 文字以上の語が無い入力が、全角で載っている語に当たらない"
+        assert find(c, "基板 制御") == ["kana", "short"], "3 文字以上の語が無い入力を語ごとに探していない"
+        c.close()
+        for old in ("1", ""):                                # 作り方の古い索引・版の印が無い索引は、索引より新しくても作り直す
+            stub_db(O.DB, old)
+            with quiet:
+                c = O._db()
+            c.close()
+            assert O._db_format_ok(), "作り方の古い検索の索引(版 %r)を作り直さない" % old
+        O.TOKENIZERS = ["no_such_tokenizer", "trigram"]      # 最初の候補を知らない SQLite
+        os.remove(O.DB)
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err):
+                c = O._db()
+            got = find(c, "field"); c.close()
+        except sqlite3.OperationalError as e:
+            got = e
+        assert got == ["lig"], "トークナイザが使えないとき、次の候補で作らない: %s" % got
+        assert "no_such_tokenizer" in err.getvalue(), "トークナイザを黙って替えている(アクセントを畳まない索引になったことが分からない)"
+        O.TOKENIZERS = ["no_such_tokenizer"]
+        os.remove(O.DB)
+        try:
+            with quiet:
+                O._db()
+            raised = False
+        except sqlite3.OperationalError:
+            raised = True
+        assert raised, "どのトークナイザも使えないのに、検索の索引ができたことにしている"
+    finally:
+        O._embed, O.TOKENIZERS = real
+    print("Q ok: 検索の索引と検索語に同じ正規化がかかる、作り方の古い索引は作り直す、トークナイザが無ければ次の候補で作る"
+          + ("" if folds else "(この SQLite はアクセントを畳めない)"))
+
+
 if __name__ == "__main__":
     check_static()
     with tempfile.TemporaryDirectory() as d:
@@ -555,4 +641,5 @@ if __name__ == "__main__":
         check_scan_guard(d)
         check_add(d)
         check_retry(d)
+        check_search_db(d)
     print("index_check: ok")

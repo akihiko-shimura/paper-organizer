@@ -121,17 +121,29 @@ papers recent --n=20        # most recently added to the index first. --json is 
 - **Columns searched**: title, authors, journal, DOI, abstract, folder name, the first 3,000 characters of the text. The weights are title > DOI, authors >
   journal > abstract > folder > text
 - **How terms are handled**: terms of 3 or more characters are searched with OR, and a partial match is enough (`Smit` finds Smith)
-  - A term is a run of ASCII letters and digits, or a run of Japanese kana and kanji. Any other character (symbols, accented letters, the Japanese long-vowel mark 「ー」 and so on)
-    ends a run, and so does a boundary between ASCII and Japanese characters (`X-ray` searches for `ray`, `Müller` searches for `ller`, `コヒーレント` searches for `レント`,
-    and `レーザー` contains no term of 3 or more characters)
-  - A term of 2 characters or fewer is ignored when it is written together with a term of 3 or more characters (`Si waveguide` searches for `waveguide` only)
-  - An input with no term of 3 or more characters (`整合`, `Si`, `レーザー`) is, in the default search, looked up as one whole string by substring match.
-    In that case:
+  - A term is a run of one of these:
+    - Letters and digits, including accented Latin letters (`Müller` and `Schrödinger` are one term each)
+    - Japanese kana and kanji, including the long-vowel mark 「ー」 and the iteration mark 「々」 (`レーザー`, `コヒーレント` and `様々な` are one term each)
+  - Any other character (symbols, Greek letters and so on) ends a run, and so does a boundary between
+    letters/digits and Japanese characters (`X-ray` searches for `ray`, `SHG素子` searches for `SHG`)
+  - Accents are ignored (`Müller` and `Muller` find the same records), except that:
+    - Letters that cannot be decomposed (`ø`, `ł`, `ß`) stay distinct (`Søren` and `Soren` differ)
+    - An input with no term of 3 or more characters (below) is accent-sensitive
+    - With an old SQLite (one whose trigram tokenizer lacks `remove_diacritics`) accents are significant. Building the search
+      index then prints `note: this SQLite … does not support tokenizer …`
+  - Full-width letters and digits, half-width katakana and ligatures (`ﬁ`) are brought to one form in both the input and the index
+    (`ＳＨＧ` is `SHG`, and `field` also finds `ﬁeld`). Text snippets show the unified form
+  - A term of 2 characters or fewer is not used when it is written together with a term of 3 or more characters (`Si waveguide` searches for
+    `waveguide` only, `レーザー 発振` for `レーザー` only). The unused terms are reported on standard error
+    (`note: terms shorter than 3 characters were not used: 発振`)
+  - An input with no term of 3 or more characters (`整合`, `Si`, `発振 制御`) is, in the default search, split at spaces, and records containing
+    any of the terms are found by substring match. In that case:
     - Only the title and the text are searched (not authors, journal, DOI, abstract or folder name)
-    - The results are not ordered by relevance and are cut off at `--n` records. No text snippet is shown
-    - A short term also matches inside other words (`Si` matches "basis"; ASCII letters match regardless of case)
-    - `%` matches any run of characters and `_` matches any one character (`T_c` looks for T, any one character, then c)
-    - Two terms side by side (`Si Ge`) are looked up as one string including the space, so the result is usually empty. Search for one term at a time
+    - Records containing more of the terms come first (`発振 制御` lists records with both first), and the list is cut off at `--n` records.
+      Relevance is not ranked beyond that. No text snippet is shown
+    - A short term also matches inside other words (`Si` matches "basis"; ASCII letters match regardless of case). A 2-letter ASCII term
+      matches almost every record, so this path is useful mainly for kanji and kana terms
+    - `%` and `_` are searched for literally (`T_c` finds T_c, `50%` finds 50%)
 - **Of the text, only the first 3,000 characters of pages 1–2 are searched.** For most papers that ends partway down page 1 (title, authors, abstract and
   the start of the introduction). Look for terms deeper in the text with Spotlight (macOS; it queries the index macOS builds, not the one `papers` builds):
 

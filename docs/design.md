@@ -395,7 +395,8 @@ dependency and a model download, which does not fit "standard library only"; if 
 
 ### What is not handled
 
-An ASCII spelling does not find an accented name (`remove_diacritics` would fix this); only the first
+Accented names are found by their ASCII spelling and the reverse (`remove_diacritics`; an older SQLite without it falls back, with a note),
+except for letters that do not decompose (`ø`, `ł`). Only the first
 3,000 characters of each PDF are indexed (Spotlight covers the rest on macOS).
 
 ### Compared with Spotlight
@@ -480,7 +481,8 @@ Collected from the notes above, plus items recorded only in the working notes.
 
 **Search**
 
-- Accented names are not found by their ASCII spelling
+- Letters that do not decompose (`ø`, `ł`, `ß`) are not matched by their ASCII spelling; with an SQLite whose trigram tokenizer lacks `remove_diacritics`, no accent is
+- A word broken by a line break in the PDF text, and terms cut at symbols (`X-ray` searches for `ray`), are not found as one word
 - Paraphrases and queries in another language than the paper are not answered. Embedding search was tested on 20
   files and 8 queries only, with one general-purpose model (section 13)
 - Unresolved files do not appear in the views
