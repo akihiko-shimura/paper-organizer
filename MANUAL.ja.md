@@ -13,14 +13,14 @@
 | もの | 場所 | 中身 |
 |---|---|---|
 | 論文 PDF | `<library>/` の下（フォルダは自由） | 同定できたものは `年_第一著者_略誌名_巻_号_開始頁.pdf` に改名する（例: `2019_Smith_OptExpress_27_8_11018.pdf`） |
-| 索引（正本） | `<repo>/papers.jsonl` | 1 行 1 論文。DOI・表題・著者・誌名・抄録・1 頁目の本文など |
+| 索引（正本） | `<repo>/papers.jsonl` | 1 行 1 論文。DOI・表題・著者・誌名・抄録・本文の先頭 3,000 字など |
 | 検索の索引 | `<repo>/papers.db` | `papers.jsonl` から作る SQLite。**直接は直さない**（作り直すだけ） |
 | 設定 | `<repo>/config.json`（任意。見本は `config.example.json`） | 連絡先のメールアドレス（`mailto`）、ビューの出力先（`views`） |
 | コマンド `papers` | `~/.local/bin/papers` → `<repo>/organize.py` へのリンク | どのディレクトリからでも動く |
 | skill `paper-search` | `~/.claude/skills/paper-search` → `<repo>/skills/paper-search` | AI エージェント（Claude Code）に使い方を渡す |
 
 索引・検索の索引・作業用のファイル（`unresolved.tsv`・`review.html`・`published.tsv`・`backups/`・改名の記録）は、どこから
-`papers` を呼んでも `<repo>/` に書かれる。**どれも git には入れない**（`.gitignore` 済み。索引は論文の 1 頁目の抜粋を含む）。
+`papers` を呼んでも `<repo>/` に書かれる。**どれも git には入れない**（`.gitignore` 済み。索引は論文の本文の冒頭を含む）。
 
 場所・更新日時・大きさ・件数は `papers info` で見る（読むだけ。`--json` で機械向け）:
 
@@ -57,8 +57,8 @@ papers search "second harmonic generation"      # 上位 10 件
 papers search "Smit"                            # 著者の一部でも引ける
 papers search "fiber laser" --n=30              # 件数を変える
 papers search "fiber laser" --full              # 表題・DOI・抄録を切らずに出す
-papers search "fiber laser" --json              # 1 行 1 記録の JSON(エージェント向け。1 頁目の本文は外す)
-papers search "fiber laser" --json --with-text  # 本文(1 頁目の先頭 3,000 字)も入れる(出力は約 2.5 倍)
+papers search "fiber laser" --json              # 1 行 1 記録の JSON(エージェント向け。本文は外す)
+papers search "fiber laser" --json --with-text  # 本文(1〜2 頁目の先頭 3,000 字)も入れる(出力は約 2.5 倍)
 ```
 
 ### Finder で辿る: `views`
@@ -116,11 +116,22 @@ papers recent --n=20        # 索引に最後に入った順。--json もある
 
 ### 検索の決まり
 
-- **見る列**: 表題・著者・誌名・DOI・抄録・フォルダ名・1 頁目の本文（最初の 3,000 字）。重みは表題 > DOI・著者 >
+- **見る列**: 表題・著者・誌名・DOI・抄録・フォルダ名・本文の先頭 3,000 字。重みは表題 > DOI・著者 >
   誌名 > 抄録 > フォルダ > 本文
-- **語の扱い**: 3 文字以上の語を OR で探し、部分一致でよい（`Smit` で Smith）。2 文字以下の語は無視する
-  （「整合」は引けない。「位相整合」なら引ける）。日本語も 3 文字以上なら引ける
-- **本文の 2 頁目以降は見ない**。本文の奥にある語は Spotlight で探す（macOS）:
+- **語の扱い**: 3 文字以上の語を OR で探し、部分一致でよい（`Smit` で Smith）
+  - 語は、英数字（ASCII）の連続か、仮名・漢字の連続で数える。それ以外の文字（記号・アクセント付きの文字・長音「ー」など）と、
+    英数字と仮名・漢字の境目で切れる（`X-ray` は `ray`、`Müller` は `ller`、`コヒーレント` は `レント` で探す。
+    `レーザー` は 3 文字以上の語にならない）
+  - 2 文字以下の語は、3 文字以上の語と一緒に書くと無視する（`Si waveguide` は `waveguide` だけで探す）
+  - 3 文字以上の語が 1 つも無い入力（`整合`・`Si`・`レーザー`）は、既定の検索では、入力の全体を 1 つの文字列として
+    部分一致で探す。このとき:
+    - 表題と本文だけを見る（著者・誌名・DOI・抄録・フォルダ名は見ない）
+    - 関連の強さでは並べず、`--n` 件で切る。本文の抜粋は出ない
+    - 短い語は他の語の一部にも当たる（`Si` は basis にも。英字の大文字と小文字は区別しない）
+    - `%` は任意の文字の並びに、`_` は任意の 1 文字に当たる（`T_c` は T・任意の 1 文字・c の並びを探す）
+    - 語を 2 つ並べると（`Si Ge`）、空白ごと 1 つの文字列として探すので、ふつう 0 件になる。1 語ずつ引く
+- **本文は 1〜2 頁目の先頭 3,000 字までしか見ない**。多くの論文で 1 頁目の途中まで（表題・著者・抄録と、序論の冒頭）にあたる。
+  それより奥にある語は Spotlight で探す（macOS。`papers` とは別の、macOS が作る索引を引く）:
 
   ```bash
   mdfind -onlyin "<library>" "Kramers-Kronig"
@@ -145,7 +156,7 @@ papers recent --n=20        # 索引に最後に入った順。--json もある
 | `papers search '(laser OR amplifier) AND fiber NOT title:review'` | 括弧で組み合わせる |
 
 - `AND`・`OR`・`NOT` は**大文字**（小文字の and は普通の語として OR 検索になる）。`NOT` の前には語が要る
-- 列名: `title`・`author`（著者全員）・`first_author`・`journal`・`doi`・`abstract`・`folder`・`text`（1 頁目の本文）
+- 列名: `title`・`author`（著者全員）・`first_author`・`journal`・`doi`・`abstract`・`folder`・`text`（本文の先頭 3,000 字）
 - ハイフンや記号を含む語は引用符で囲む（`"second-harmonic"`。囲まないと書き方の誤りとして止まり、直し方が出る）
 - 2 文字以下の語（`CW`・`UV`）は索引で引けない。式に入れると注意が出て、その条件は 0 件になる
 - シェルでは式全体を `'…'` で囲む（`"…"` の語句を中に書けるように）

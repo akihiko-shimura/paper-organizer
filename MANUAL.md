@@ -13,14 +13,14 @@ For now, the output of the commands (messages) is in Japanese only.
 | Item | Location | Contents |
 |---|---|---|
 | Paper PDFs | Under `<library>/` (any folder layout) | Identified files are renamed to `year_firstauthor_shortjournal_volume_issue_firstpage.pdf` (example: `2019_Smith_OptExpress_27_8_11018.pdf`) |
-| Index (master copy) | `<repo>/papers.jsonl` | One paper per line. DOI, title, authors, journal, abstract, text of the first page, and so on |
+| Index (master copy) | `<repo>/papers.jsonl` | One paper per line. DOI, title, authors, journal, abstract, the first 3,000 characters of the text, and so on |
 | Search index | `<repo>/papers.db` | SQLite built from `papers.jsonl`. **Do not edit it directly** (only rebuild it) |
 | Settings | `<repo>/config.json` (optional; the sample is `config.example.json`) | Contact email address (`mailto`), output location of the views (`views`) |
 | Command `papers` | `~/.local/bin/papers` → link to `<repo>/organize.py` | Works from any directory |
 | skill `paper-search` | `~/.claude/skills/paper-search` → `<repo>/skills/paper-search` | Gives AI agents (Claude Code) the instructions for use |
 
 The index, the search index and the working files (`unresolved.tsv`, `review.html`, `published.tsv`, `backups/`, the rename log) are written to
-`<repo>/` no matter where you call `papers` from. **None of them goes into git** (already in `.gitignore`; the index contains excerpts of the first page of each paper).
+`<repo>/` no matter where you call `papers` from. **None of them goes into git** (already in `.gitignore`; the index contains the opening text of each paper).
 
 Use `papers info` to see locations, update times, sizes and record counts (read-only; `--json` for machines):
 
@@ -59,8 +59,8 @@ papers search "second harmonic generation"      # top 10 records
 papers search "Smit"                            # part of an author name also matches
 papers search "fiber laser" --n=30              # change the number of results
 papers search "fiber laser" --full              # print title, DOI and abstract without truncating
-papers search "fiber laser" --json              # JSON, one record per line (for agents; the first-page text is left out)
-papers search "fiber laser" --json --with-text  # also include the text (the first 3,000 characters of page 1) (output is about 2.5 times larger)
+papers search "fiber laser" --json              # JSON, one record per line (for agents; the text is left out)
+papers search "fiber laser" --json --with-text  # also include the text (the first 3,000 characters of pages 1–2) (output is about 2.5 times larger)
 ```
 
 ### Browsing in Finder: `views`
@@ -118,11 +118,22 @@ papers recent --n=20        # most recently added to the index first. --json is 
 
 ### Search rules
 
-- **Columns searched**: title, authors, journal, DOI, abstract, folder name, text of the first page (the first 3,000 characters). The weights are title > DOI, authors >
+- **Columns searched**: title, authors, journal, DOI, abstract, folder name, the first 3,000 characters of the text. The weights are title > DOI, authors >
   journal > abstract > folder > text
-- **How terms are handled**: terms of 3 or more characters are searched with OR, and a partial match is enough (`Smit` finds Smith). Terms of 2 characters or fewer are ignored
-  (the two-character Japanese word 「整合」 cannot be found; the four-character 「位相整合」 can). Japanese terms also work if they have 3 or more characters
-- **The text from page 2 onward is not searched.** Look for terms deep in the text with Spotlight (macOS):
+- **How terms are handled**: terms of 3 or more characters are searched with OR, and a partial match is enough (`Smit` finds Smith)
+  - A term is a run of ASCII letters and digits, or a run of Japanese kana and kanji. Any other character (symbols, accented letters, the Japanese long-vowel mark 「ー」 and so on)
+    ends a run, and so does a boundary between ASCII and Japanese characters (`X-ray` searches for `ray`, `Müller` searches for `ller`, `コヒーレント` searches for `レント`,
+    and `レーザー` contains no term of 3 or more characters)
+  - A term of 2 characters or fewer is ignored when it is written together with a term of 3 or more characters (`Si waveguide` searches for `waveguide` only)
+  - An input with no term of 3 or more characters (`整合`, `Si`, `レーザー`) is, in the default search, looked up as one whole string by substring match.
+    In that case:
+    - Only the title and the text are searched (not authors, journal, DOI, abstract or folder name)
+    - The results are not ordered by relevance and are cut off at `--n` records. No text snippet is shown
+    - A short term also matches inside other words (`Si` matches "basis"; ASCII letters match regardless of case)
+    - `%` matches any run of characters and `_` matches any one character (`T_c` looks for T, any one character, then c)
+    - Two terms side by side (`Si Ge`) are looked up as one string including the space, so the result is usually empty. Search for one term at a time
+- **Of the text, only the first 3,000 characters of pages 1–2 are searched.** For most papers that ends partway down page 1 (title, authors, abstract and
+  the start of the introduction). Look for terms deeper in the text with Spotlight (macOS; it queries the index macOS builds, not the one `papers` builds):
 
   ```bash
   mdfind -onlyin "<library>" "Kramers-Kronig"
@@ -147,7 +158,7 @@ If you write an operator in the query, the results are narrowed by that expressi
 | `papers search '(laser OR amplifier) AND fiber NOT title:review'` | Combine with parentheses |
 
 - `AND`, `OR` and `NOT` are **upper case** (a lower-case `and` is treated as an ordinary term and the query becomes an OR search). `NOT` needs a term before it
-- Column names: `title`, `author` (all authors), `first_author`, `journal`, `doi`, `abstract`, `folder`, `text` (text of the first page)
+- Column names: `title`, `author` (all authors), `first_author`, `journal`, `doi`, `abstract`, `folder`, `text` (the first 3,000 characters of the text)
 - Enclose terms that contain a hyphen or a symbol in quotation marks (`"second-harmonic"`. Without them the command stops with a syntax error and shows how to fix it)
 - Terms of 2 characters or fewer (`CW`, `UV`) cannot be looked up in the index. If you put one in an expression, a warning is shown and that condition matches 0 records
 - In the shell, enclose the whole expression in `'…'` (so that `"…"` phrases can be written inside)

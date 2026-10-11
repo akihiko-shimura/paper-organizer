@@ -17,7 +17,7 @@ model: sonnet
 
 ```bash
 papers info --json                       # 場所・件数・検索の索引が古いか(db_stale)・パスの無い記録(missing_files)
-papers search '<式>' --json --n=50       # 1 頁目の本文を外した JSON。AND・OR・NOT・"語句"・列名:(title・author・journal など)
+papers search '<式>' --json --n=50       # 本文を外した JSON。AND・OR・NOT・"語句"・列名:(title・author・journal など)
 papers has <DOI や arXiv ID…>            # 持っているかを完全一致で
 papers cite <DOI・ファイル名の一部>       # BibTeX
 papers add [<フォルダ>]                   # 新しい PDF を足し、重複・改名の予定まで出す(ファイルは動かさない)
