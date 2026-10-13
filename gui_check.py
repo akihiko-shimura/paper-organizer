@@ -642,6 +642,17 @@ def check_tidy(e):
     assert O3.BOOKS and not O.BOOKS and [gui._kind_key(O3, r) for r in [{}] + marked] == ["book", "paper", "bookpart", "thesis", "bookpart"] \
         and [gui._kind_key(O, r) for r in [{}] + marked] == ["paper", "paper", "bookpart", "thesis", "paper"], "今の種類が DB の既定・付いた種類と合わない"
     assert all(gui._kind_key(M, r) == ("paper" if M.kind_group(r) == "paper" else r.get("kind") or "book") for M in (O, O3) for r in [{}] + marked)
+    # 書籍の DB の一覧は 1 つの順位で並ぶので、「全頁の本文でだけ当たる」に分けない(印も区切りも件数の内訳も出さない)。論文の DB は分ける
+    bk = os.path.join(d3, "k.pdf")
+    open(bk, "w").write("k.pdf")
+    write(O3.INDEX, [{"path": bk, "folder": d3, "filename": "k.pdf", "rung": "unresolved", "source": None, "title_guess": "A handbook"}])
+    O3._embed = O._embed
+    O3._fulltext_save(O3._file_key(bk), "pdftotext", ["Only deep inside: laser here."], False)
+    with contextlib.redirect_stderr(io.StringIO()):
+        O3.build_db().close()
+    paths, near, _ = gui.find(gui.App(O3, "t", os.path.join(e.d, "static")), "laser", True)
+    assert paths == [bk] and near is None, "書籍の DB の一覧を、全頁の本文でだけ当たる記録に分けた: %s %s" % (paths, near)
+    assert gui.find(e.app, "laser", True)[1] is not None, "論文の DB の一覧を分けていない"
     shutil.rmtree(d3)
     # 予定を見るだけでは、どちらの DB の索引もファイルも変わらない
     st, _, obj = tidy(e.g, False, kind="book", to="remove")

@@ -3564,6 +3564,9 @@ W = [0, 0, 8, 6, 10, 6, 4, 2, 3, 1]
 # 1 つの表にすると、文書の長さが bm25 に入って、全頁の本文を入れる前の順位が変わる(DESIGN.md「全文の索引」)。
 FCOLS = COLS + ["fulltext"]
 WF = W + [0.3]              # f でだけ当たる記録どうしの並びに使う
+# 書籍の DB の順位。先頭 3,000 字の列(text)は数えない: 本の先頭は表紙・叢書の一覧・目次で、その字は全頁の本文にも入っている
+# (DESIGN.md「書籍の DB」)
+WB = W[:-1] + [0, 0.3]
 # 検索の索引の作り方の版。build_db の作る中身(トークナイザ・正規化・列)を変えたら上げる。古い版の papers.db は作り直す。
 # 2: 文字列を NFKC にし、アクセントを畳む(remove_diacritics)
 # 3: 字の間に離れて載るアクセント記号を落とす。本文・抄録・表題の仮名・漢字の間の空白を詰める。著者の欄の両端に空白を足す
@@ -3771,6 +3774,8 @@ def _like(q, full=True):
     near, anywhere, args = _like_hits(q)
     if not full:
         return "SELECT path FROM f WHERE %s > 0 ORDER BY %s DESC, rowid LIMIT ?" % (near, near), args(2) * 2
+    if BOOKS:                                  # 書籍の DB: 表題・先頭で当たるかを優先しない。全頁の本文まで入れて、含む語の多い順
+        return "SELECT path FROM f WHERE %s > 0 ORDER BY %s DESC, rowid LIMIT ?" % (anywhere, anywhere), args(3) * 2
     return ("SELECT path FROM f WHERE %s > 0 ORDER BY (%s) > 0 DESC, CASE WHEN (%s) > 0 THEN %s ELSE %s END DESC, rowid LIMIT ?"
             % (anywhere, near, near, near, anywhere), args(3) + args(2) * 3 + args(3))
 
@@ -3782,7 +3787,10 @@ def _visible(paths, hidden, n):
 
 def _only_full(c, q, path):
     """この記録が、全頁の本文を入れて初めて式に当たるか(表題・著者・抄録・先頭の本文だけでは当たらない)。
-    fulltext: を名指しした式は表 p で評価できないので、印を付けない(どの記録も偽)。"""
+    fulltext: を名指しした式は表 p で評価できないので、印を付けない(どの記録も偽)。書籍の DB でも付けない(並びが全頁の本文の順位なので、
+    印で分ける 2 つの組が無い)。"""
+    if BOOKS:
+        return False
     m = _match(q)
     if not m:
         near, anywhere, args = _like_hits(q)
@@ -3797,13 +3805,16 @@ def _only_full(c, q, path):
 def _fts(c, q, n, full=True):
     """順位つきの検索。表 p(表題・著者・抄録・先頭の本文など)で当たる記録を p の順位で先に並べ、n 件に届かなければ、
     全頁の本文を入れた表 f でだけ当たる記録を後ろに足す。full=False なら全頁の本文を見ない(hybrid。入れる前と同じ並び。
-    fulltext: を名指しした式は 0 件になる)。"""
+    fulltext: を名指しした式は 0 件になる)。
+    書籍の DB では、表 f の順位だけで並べる(重みは WB)。本は先頭で当たるかどうかが、その本が詳しく扱うかを表さない。"""
     m = _match(q)
     if not m:                                  # 2文字以下(trigram が索引できない)
         sql, args = _like(q, full)
         return [r[0] for r in c.execute(sql, args + [n]).fetchall()]
     ranked = lambda t, w, k: [r[0] for r in c.execute("SELECT path FROM %s WHERE %s MATCH ? ORDER BY bm25(%s,%s) LIMIT ?"
                                                     % (t, t, t, ",".join(str(x) for x in w)), (m, k))]   # bm25 は昇順(小さいほど良い)
+    if BOOKS and full:
+        return ranked("f", WB, n)
     first = [] if _FULL_COL.search(m) else ranked("p", W, n)
     if len(first) >= n or not full:
         return first

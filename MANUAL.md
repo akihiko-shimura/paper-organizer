@@ -82,7 +82,8 @@ PAPERS_HOME=~/papers-books papers search "group delay"     # searches every page
 
 - `exclude` names folders directly under the folder you pass that are not scanned
 - Scanned books are OCRed on every page, so the first `add` takes on the order of an hour. If you stop it, the next `add` continues
-- Unlike a paper database: no `dedup`, no `nonpaper` moves, and a record without a kind is a book
+- Unlike a paper database: no `dedup`, no `nonpaper` moves, and a record without a kind is a book. Search results are ranked on
+  the full text (first-page matches are not put first, and there is no "matched only in the full text" separator)
 - Metadata of Japanese books (ISBNs starting with 9784) comes from the NDL Search API of the National Diet Library, Japan; the rest from Crossref and Open Library
 
 **Books that were not identified** (no ISBN in the PDF, or not in the catalogues) are listed by `add` with the reason. You decide:

@@ -1557,7 +1557,15 @@ def check_books(d):
     O.from_arxiv = lambda aid: {"arxiv_id": aid, "title": "Notes on Imaginary Entropy", "year": 2020, "first_author": "Mustermann",
                                 "authors": ["Max Mustermann"], "journal": "arXiv", "journal_short": "arXiv", "source": "arxiv"}
     O._embed = lambda texts: [None] * len(texts)
-    O._run_text, O._ptext, O._vocr = (lambda cmd, timeout: (long + "\f", None)), (lambda: "ptext"), (lambda: None)
+    # 全頁の本文(文字の層の作り物とは別)。nois は「zebrafish」を本文にだけ何度も持ち、ten は先頭の頁に 1 度だけ持つ。
+    # supp は「光学」を本文にだけ、wasyo は先頭の頁にだけ持つ(2 文字なので部分一致の経路)
+    # 先頭 3,000 字の列は順位に数えない: 「quokka」を先頭の頁に 1 度だけ持つ 2101.00001 より、本文に 1 度持つ wrong が先
+    full_of = {"nois.pdf": long + "zebrafish " * 50, "supp.pdf": long + "光学 " * 5, "wrong.pdf": long + "quokka "}
+    layer["2101.00001.pdf"][0] += " quokka"
+    layer["ten.pdf"][0] += " zebrafish"
+    layer["wasyo.pdf"][0] += " 光学"
+    O._run_text = lambda cmd, timeout: (full_of.get(os.path.basename(cmd[1]) if cmd[0] == "pdftotext" else "", long) + "\f", None)
+    O._ptext, O._vocr = (lambda: "ptext"), (lambda: None)
     recs = lambda: {r["filename"]: r for r in map(json.loads, open(O.INDEX))}
     def run(fn, *a):
         O.sys.argv = ["organize.py", fn.__name__] + list(a)
@@ -1622,6 +1630,24 @@ def check_books(d):
         with contextlib.redirect_stdout(buf):
             O.search()
         assert "nois" in buf.getvalue(), "未同定の本を、ファイル名(表題の欄)で検索できない: %s" % buf.getvalue()
+        # 順位: 全頁の本文の順位で並べる(先頭の頁で当たる記録を先にしない)。「全頁の本文でだけ当たる」の区切りも出さない
+        def found(*a):
+            O.sys.argv = ["organize.py", "search"] + list(a)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                O.search()
+            return buf.getvalue()
+        order = lambda out, names: sorted(names, key=out.index)
+        z = found("zebrafish")
+        assert "nois" in z and "ten.pdf" in z and order(z, ["nois", "ten.pdf"]) == ["nois", "ten.pdf"] and "matched only" not in z, \
+            "書籍の DB の順位: 本文で何度も当たる本より、先頭の頁で 1 度当たる本を先に並べた、または区切りを出した: %s" % z
+        k = found("光学")
+        assert order(k, ["supp.pdf", "wasyo.pdf"]) == ["supp.pdf", "wasyo.pdf"] and "matched only" not in k, \
+            "書籍の DB の順位(3 文字以上の語が無い入力): 先頭の頁で当たる本を先に並べた、または区切りを出した: %s" % k
+        assert '"matched"' not in found("zebrafish", "--json"), "書籍の DB で、--json に「全頁の本文でだけ」の印を付けた"
+        u = found("quokka")
+        assert order(u, ["wrong.pdf", "2101.00001.pdf"]) == ["wrong.pdf", "2101.00001.pdf"], \
+            "書籍の DB の順位: 先頭 3,000 字の列を数えている(本の先頭は表紙・目次で、その字は全頁の本文にも入っている): %s" % u
         # 止めるもの: 重複の集約・論文以外の移動
         for fn in (O.dedup, O.nonpaper):
             assert run(fn, "--apply")[0] == "exit" and run(fn)[0] == "exit" and all(os.path.exists(f(n)) for n in layer), \

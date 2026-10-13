@@ -226,7 +226,8 @@ def _bib(O, r):
 
 def find(app, q, all_terms):
     """(一覧に出すパスの並び, そのうち表題・著者・抄録・先頭の本文で当たるパスの集合か None, 部分一致の経路か)。
-    並びは O._fts のまま: 先頭側で当たる記録が先、全頁の本文でだけ当たる記録が後ろ。移した重複と、索引に無いパスは外す。
+    並びは O._fts のまま: 論文の DB は、先頭側で当たる記録が先、全頁の本文でだけ当たる記録が後ろ。書籍の DB は 1 つの順位で並ぶので、
+    2 つに分けない(集合は None)。移した重複と、索引に無いパスは外す。
     入力が空なら、全部の記録を索引の順で(絞り込みだけで眺める)。"""
     O, recs, q2 = app.O, app.lib.records(), query_for(app.O, q, all_terms)
     if not q2.strip():
@@ -235,7 +236,7 @@ def find(app, q, all_terms):
     c = app.db()
     try:
         paths = O._fts(c, q2, 1 << 30)
-        near = None if not m or O._FULL_COL.search(m) else {p for (p,) in c.execute("SELECT path FROM p WHERE p MATCH ?", (m,))}
+        near = None if not m or O._FULL_COL.search(m) or O.BOOKS else {p for (p,) in c.execute("SELECT path FROM p WHERE p MATCH ?", (m,))}
     except sqlite3.OperationalError as e:
         raise ApiError(400, "invalid search expression (%s). Write AND, OR, NOT in capitals and quote terms that contain "
                             "hyphens or symbols (\"second-harmonic\")." % e)
