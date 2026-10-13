@@ -1,6 +1,6 @@
 // PDF の全頁の本文を標準出力へ。頁の終わりに改頁(U+000C)を付ける(pdftotext と同じ形)。
 // pdftotext が時間切れ・失敗したときの代わりに organize.py が呼ぶ(papers fulltext)。
-// 例: InDesign が書き出した図の多い頁で、Poppler が色の定義を図形ごとに読み直し 1 頁に 97 秒かかる PDF が、これなら 0.1 秒。
+// Poppler が 1 頁に 1 分以上かかる PDF がある(docs/design.md の「Full text」)。
 import Foundation
 import PDFKit
 

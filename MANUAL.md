@@ -23,18 +23,30 @@ For now, the output of the commands (messages) is in Japanese only.
 The index, the search index and the working files (`unresolved.tsv`, `review.html`, `published.tsv`, `backups/`, the rename log) are written to
 `<repo>/` no matter where you call `papers` from. **None of them goes into git** (already in `.gitignore`; the index contains the opening text of each paper).
 
-Use `papers info` to see locations, update times, sizes and record counts (read-only; `--json` for machines):
+### Separate libraries: `PAPERS_HOME`
 
+The index, the search index, the full text and the working files together are one library (a "DB"). By default it lives in `<repo>/`.
+Point the environment variable `PAPERS_HOME` at another folder and that folder becomes a separate library (for example, books and theses
+apart from papers). Create the folder first.
+
+```bash
+mkdir -p ~/papers-books
+PAPERS_HOME=~/papers-books papers add <folder of book PDFs>   # build another library; every command for it takes PAPERS_HOME
+PAPERS_HOME=~/papers-books papers info                        # the "DB folder" line shows which library you are looking at
+papers gui --db=~/papers-books                                # open it in the window together with the usual library
 ```
-リポジトリ    /Users/…/paper-organizer
-論文の置き場  /Users/…/Papers
-索引          /Users/…/paper-organizer/papers.jsonl
-              更新 2026-09-23 17:25 ・ 15.3 MB ・ 3248 件（解決済み 2232 ・ 人手行き 842 ・ 重複として移した 129）
-検索の索引    /Users/…/paper-organizer/papers.db
-              更新 2026-09-23 17:26 ・ 597.0 MB ・ 3248 件(全頁の本文あり 3248 件)
-最後の改名    2026-09-23 17:25
-最新の退避    /Users/…/backups/papers-20260923-172530-before-rename.jsonl
-```
+
+- Commands without `PAPERS_HOME` use the library in `<repo>/`, as before
+- To always open it together, put `"dbs": [{"name": "Books", "home": "~/papers-books"}]` in `<repo>/config.json` (`name` is optional;
+  only the `config.json` in the folder of the library you start with is read)
+- The name shown in the window is the `name` in `dbs`, then the `name` in that library's own `config.json`, then the name of the folder that
+  holds its PDFs
+- For another library, `papers views` writes to "the usual output folder + `-` + the library's folder name" (change it with `views` in that
+  library's own `config.json`)
+- To move records from the usual library into another one, use `papers send` (see "Removing a file, or moving it to another library").
+  Set where its PDFs live with `"library": "<folder>"` in the `config.json` in that library's folder
+
+Use `papers info` to see locations, update times, sizes and record counts (read-only; `--json` for machines). Its labels are in Japanese.
 
 The labels are: リポジトリ = repository, 論文の置き場 = library folder, 索引 = index, 検索の索引 = search index, 更新 = updated, 件 = records, 解決済み = resolved, 人手行き = needs a person, 重複として移した = moved aside as duplicates, 最後の改名 = last rename, 最新の退避 = latest backup.
 
@@ -53,6 +65,55 @@ The `rung` (段) of an index record shows how certain that record is.
 Records that have `duplicate_of` or `published_copy` are duplicates that were moved to `_重複文献/` (duplicates) or `_プレプリント(出版版あり)/` (preprints whose published version is held),
 and they are waiting for the user to delete them. The paper itself is in another record (the path that `duplicate_of` or `published_copy` points to).
 
+### A book database
+
+Keep book PDFs in a database of their own. Put `"books": true` in the `config.json` of the database folder and that database treats
+its PDFs as books: it takes the ISBN from the copyright page, looks it up (Crossref, Open Library, and the National Diet Library for
+Japanese books), and accepts the answer only when the returned title is printed in the PDF.
+
+```bash
+mkdir -p ~/papers-books
+cat > ~/papers-books/config.json <<'JSON'
+{"books": true, "name": "Books", "library": "<folder of book PDFs>", "exclude": ["misc", "errata"]}
+JSON
+PAPERS_HOME=~/papers-books papers add <folder of book PDFs>   # identify → list what was not identified → planned names → full text → search index
+PAPERS_HOME=~/papers-books papers search "group delay"     # searches every page
+```
+
+- `exclude` names folders directly under the folder you pass that are not scanned
+- Scanned books are OCRed on every page, so the first `add` takes on the order of an hour. If you stop it, the next `add` continues
+- Unlike a paper database: no `dedup`, no `nonpaper` moves, and a record without a kind is a book
+- Metadata of Japanese books (ISBNs starting with 9784) comes from the NDL Search API of the National Diet Library, Japan; the rest from Crossref and Open Library
+
+**Books that were not identified** (no ISBN in the PDF, or not in the catalogues) are listed by `add` with the reason. You decide:
+
+```bash
+PAPERS_HOME=~/papers-books papers review     # writes unresolved.tsv; the candidates column holds title-search hints (read only)
+# write the ISBN or the DOI of the right book in the isbn or doi column (an ISBN fixes the edition; a hint can be another edition or another book)
+PAPERS_HOME=~/papers-books papers merge      # looks the number up and writes the record
+PAPERS_HOME=~/papers-books papers index      # update the search
+```
+
+**Kinds** (a single chapter, front matter only or a preprint is a "book part"; lecture notes and documents too): open the page with
+`papers nonpaper-page`, press the keys, export, then `papers nonpaper-ok <exported file>`. Files are not moved. arXiv preprints start as
+"book part". A chapter-only PDF that carries the book's ISBN is identified as the whole book, so the kind is yours to set.
+
+**Renaming** (optional): `Author - Title (edition, year).pdf`. Surnames only (two authors with `&`, three or more as `et al`, editors
+with `(ed.)`), the main title without the subtitle, the edition only from the second on.
+
+```bash
+PAPERS_HOME=~/papers-books papers rename           # prints the plan and writes rename.tsv (nothing is moved)
+# check and edit the author, title, edition and year columns of rename.tsv (leave the path column alone); run papers rename again to see the names
+PAPERS_HOME=~/papers-books papers rename --apply   # renames the books that have a row in the table; papers undo puts the names back
+```
+
+- Edition and year start from what your current file name says, then the copyright page, then (year only) the catalogue. Author and title
+  start from the catalogue (which may list only the first author). Any of them can be wrong, so check the table
+- To leave a book as it is, delete its row before `--apply` (a new plan brings the row back with the default values)
+- You may open and save the table in a spreadsheet. Keep it tab-separated (`--apply` stops on a comma-separated table)
+- Only whole books that were identified are renamed. Book parts, preprints and unidentified files keep their names
+- A name that differs from the current one only in letter case is not changed
+
 ## 2. Searching
 
 ```bash
@@ -64,6 +125,41 @@ papers search "fiber laser" --json              # JSON, one record per line (for
 papers search "fiber laser" --json --with-text  # also include the text (the first 3,000 characters of pages 1–2) (output is about 2.5 times larger)
 papers search "fiber laser" --kind=paper       # filter by kind (paper, book, other)
 ```
+
+### Searching in a window: `gui`
+
+```bash
+papers gui                                  # start a server on 127.0.0.1 and open it in the browser. Stop it with Ctrl-C
+cargo run --manifest-path app/Cargo.toml    # open the same screen in its own window (needs Rust)
+sh app/bundle.sh                            # build papers.app, which opens from Finder (macOS; needs Rust)
+```
+
+- `papers.app` is written to `app/target/release/bundle/macos/`; copy it to your Applications folder if you like. It is for the Mac it
+  was built on: it runs the `gui.py` of this repository with that Mac's `python3` and poppler (rebuild it if you move the repository).
+  The first time it opens a PDF or shows a page, macOS may ask whether it may access the folder (for example Google Drive)
+
+- Running `papers gui` again stops the one started earlier and takes its place (the earlier browser tab stops working; use the new one)
+- The search box takes the same expressions as `papers search`. Several terms mean "match all terms" by default (untick it for
+  any term, as in `search`). An empty box lists every record
+- The count is "records matched by title, authors, abstract or the first text + records matched only in the full text". The second
+  number also counts terms that appear in reference lists
+- Narrow by year, journal, status and kind; sort by relevance, year or first author
+- Selecting a row shows the bibliographic data, the abstract, where the terms appear in the full text (with the PDF page) and BibTeX.
+  Clicking an author searches for that family name
+- Space shows the pages as images. Clicking the page number of a match starts from that page. The keys are listed at the bottom of
+  the screen
+- "Edit" does what `papers fix` does. With a DOI it looks up the title, authors, journal, volume and pages (the reliable way
+  for a journal article). A book can be looked up by typing its ISBN into the same field (where it asks is the same as `papers fix` below). Without one, fill in the title, authors, the first author's family name, year and journal by hand (all authors,
+  separated by ";"). It shows the changes before writing. To carry them into file names and the search index, run
+  `papers rename --apply` and `papers index` afterwards
+- "File away" (`m`) is for a file that is not a paper, or that you do not want: change its kind, remove it from the library, or move it
+  to another library opened together. It shows the changes and where the file will go before doing anything (see "Removing a file,
+  or moving it to another library")
+- `i` (or "Library") shows which library is loaded: where it is, how many records it has and how fresh it is (the same as `papers info`)
+- With another library opened together (`papers gui --db=<its folder>`; see "Separate libraries"), the lists are stacked, one per library.
+  The same query runs in all of them and each list shows its own count. The buttons at the top choose which libraries are shown
+- It goes out to the network only when "Edit" looks up a DOI (links such as the DOI open in your default browser). When the search
+  index is out of date it is not rebuilt; the screen says so
 
 ### Browsing in Finder: `views`
 
@@ -281,7 +377,7 @@ papers index                  # rebuild the search index (about 30 seconds for 3
   ANTHROPIC_API_KEY=… uv run --quiet --with anthropic --python 3.12 python vet.py
   ```
 
-  Look at the estimate and, if it is acceptable, add `--apply` to the same command (Batch API. It was 3.31 dollars for 3,203 records and 0.05 dollars for 50 records).
+  Look at the estimate and, if it is acceptable, add `--apply` to the same command (Batch API. The estimate shows the cost; a few dollars for a few thousand records).
   Pass the key in the environment variable (if it is stored in the macOS keychain:
   `ANTHROPIC_API_KEY=$(security find-generic-password -s anthropic-api-key -w)`).
 
@@ -294,14 +390,22 @@ papers index                  # rebuild the search index (about 30 seconds for 3
 ### Correcting one record: `fix`
 
 ```bash
-papers fix <part of file name> --doi <correct DOI>                  # look the record up again from Crossref with the correct DOI
+papers fix <part of file name> --doi <correct DOI>                  # look the record up again with the correct DOI
+papers fix <part of file name> --isbn <ISBN of the book>             # look a book up by its ISBN (for books without a DOI)
 papers fix <part of file name> --set year=1993 --set first_author=Yamada   # correct fields directly
 ```
 
 - The first argument is part of a file name or a full path. **The command stops if this does not narrow down to one record** (it shows the candidates that matched)
+- `--doi` asks Crossref first. For a DOI Crossref does not have, it asks doi.org which agency registered it and then takes the record from
+  DataCite (data, software, institutional repositories) or JaLC (Japanese journals and theses; the English title and names are used when JaLC has them). An arXiv DOI (`10.48550/arXiv.…`) goes to
+  arXiv. In a book library, the DOI of a whole book is accepted too. DOIs of other agencies cannot be looked up (the command names the
+  agency and stops); use `--set` for those
 - By default it only shows before → after. Check it, then add `--apply` to write (it backs up to `backups/` before writing)
 - Fields that can be corrected: `doi` `year` `first_author` `journal` `journal_short` `volume` `issue` `pages` `title` `article_number`
-  `published_doi`. A corrected record gets `rung: manual` (a value decided by a person. Automatic checks do not overwrite it)
+  `published_doi` `authors`. `first_author` is the **family name** of the first author (it goes into the file name and the citation key).
+  `authors` is everyone, each written as "Given Family" and separated by ";" (`--set authors="Ann Example; Bo Sample"`).
+  A corrected record gets `rung: manual` (a value decided by a person. Automatic checks do not overwrite it)
+- A record corrected without a journal (a thesis, a book) is not renamed by `rename` (the file keeps its name). Its citation is made as `@misc`
 - After correcting, apply the change to the file name and to the search:
 
   ```bash
@@ -377,10 +481,34 @@ papers nonpaper --apply && papers index               # move
   A record changed back to a paper is not moved back automatically (use `papers move`)
 - A record marked as a non-paper is no longer listed for a person and is not renamed or treated as a duplicate. It still appears in `papers search`
 - **Not proposed**: non-papers of 50 pages or fewer (short slides, manuals, patents) and PDFs whose page count cannot be read. Mark these by writing the file for `nonpaper-ok`
-  by hand (one line per file: path, tab, key). Book chapters that were identified are not proposed, and there is no way to mark them yet
-- Why 50 pages: a person looked at all 109 unidentified files of more than 50 pages. Of the 63 over 100 pages, 62 were not papers; of the 46 with 51–100 pages, 37 were not
-  (the rest were review articles, identified afterwards)
+  by hand (one line per file: path, tab, key). Book chapters that were identified are not proposed. One at a time, "File away" in the
+  window sets the kind (also on identified records)
+- Why 50 pages: in the author's library, most unidentified files longer than that were not papers (the rest were reviews, identified later)
 - The folder names are Japanese: `_論文以外` (non-papers), `本・ハンドブック` (books), `学位論文` (theses), `講義ノート・スライド` (lectures), `報告書・マニュアル・資料` (documents), `特許` (patents)
+
+### Removing a file, or moving it to another library: `remove`, `send`
+
+For a file that is not a paper, or that you do not want. The window's "File away" (`m`) does the same.
+
+```bash
+papers remove <part of file name>                              # only shows the plan
+papers remove <part of file name> --apply && papers index      # remove it from the library
+papers send <part of file name> --to <folder of another DB>    # only shows the plan
+papers send --nonpaper --to <folder of another DB> --apply     # every record marked as a non-paper, to another library
+```
+
+- `remove` marks the record and moves the file to `_索引から外した/` ("taken out of the index") under the library folder. A removed record
+  is left out of search, the window, renaming and duplicates, and is not counted as needing a person or as held (`has`). Its line stays in
+  the index (if it were deleted, the next `papers add` would index the file again). `papers undo` brings back both the file and the record.
+  Deleting the file is up to you (in Finder); afterwards `papers relocate --apply` drops the line
+- `send` moves the file into the other library's folder for PDFs, and moves the record and its full text to the other library. A marked
+  non-paper goes into the folder of its kind there. The other library's folder for PDFs is `"library": "<folder>"` in the `config.json`
+  in that library's folder (without it, the common parent of the folders of its records). For a library with no records yet, write
+  `library` first. To undo, send it back from the other library (`PAPERS_HOME=<other> papers send <name> --to <repo>`)
+- `send` stops when one library keeps its PDFs inside the other's folder (the next `papers add` in the outer one would index the sent
+  files again). Give another library a folder outside the usual one
+- Moved duplicates, removed records and the records they point to cannot be removed or sent
+- Afterwards update the search: `papers index` (after `send`, also in the other library: `PAPERS_HOME=<other> papers index`)
 
 ### Files moved, renamed or deleted by hand: `relocate`
 
@@ -416,9 +544,9 @@ papers relocate --forget --apply    # back up the index, then drop them
 
 ### Undoing
 
-- Renames, `move` and `nonpaper --apply`: `papers undo` (reverts the most recent one). If another file has since been put in the original place,
+- Renames, `move`, `nonpaper --apply` and `remove --apply`: `papers undo` (reverts the most recent one). If another file has since been put in the original place,
   it is not overwritten: the command prints 「戻さなかった」 (not reverted) and leaves that file where it is now. If the original folder was deleted, it is created again
-- The commands that move files (`rename`, `move`, `dedup`, `nonpaper`, `undo`) never overwrite a file at the destination. Names that differ only in
+- The commands that move files (`rename`, `move`, `dedup`, `nonpaper`, `remove`, `send`, `undo`) never overwrite a file at the destination. Names that differ only in
   letter case count as the same name. When the name is taken, `rename`, `dedup` and `nonpaper` append `_2`, `move` stops, and `undo` skips that
   file and goes on. If a file appears at the destination after the plan was made, every command stops just before moving. If a command stops partway,
   the files already moved are in the index

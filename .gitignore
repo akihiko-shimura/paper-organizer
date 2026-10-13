@@ -43,6 +43,7 @@ scan.log
 claude-session-log/
 leak-personal.txt
 leak-allow.txt
+leak-dbs.txt
 
 # Full text of every page, read by `papers fulltext` (search only; rebuilt on demand)
 fulltext/

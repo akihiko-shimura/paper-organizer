@@ -74,6 +74,7 @@ def targets(recs, done):
     取得済みは結果のキャッシュ(パスで引く)と、索引に反映済みの印(page_type)の両方で見る。rename でパスが
     変わるとキャッシュでは引けなくなるため(2026-09-23、一括 rename の前に気づいた)。"""
     return [r for r in recs if cid(r["path"]) not in done and "page_type" not in r and os.path.exists(r["path"])
+            and not r.get("removed")                                # 利用者が DB から外した記録に課金しない
             and ((O.renamable(r) and r.get("rung") != "manual") or r.get("rung") in ("unverified", "unresolved"))]
 
 
@@ -261,6 +262,7 @@ def selftest():
     main(["vet.py", "--apply"], Fake, recs, render)
     assert Fake.created == 1, "--apply で投入できていない(検査が何も見ていない)"
     assert not targets([dict(recs[0], rung="supplement")], {}), "補足資料を対象にしている"
+    assert not targets([dict(recs[0], removed="user")], {}), "利用者が DB から外した記録を対象にしている(要らない記録に課金する)"
     assert not targets(recs, {cid(__file__): {}}), "取得済みをもう一度課金しようとしている"
     assert not targets([dict(recs[0], page_type="article_first_page", page_title=None)], {}), \
         "索引に反映済みの記録を、パスが変わった(rename)だけでもう一度課金しようとしている"

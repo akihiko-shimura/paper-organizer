@@ -7,7 +7,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # 未定義名の検出。corroborate() が全リビジョンから消えていた事故はこれで赤になる。
-      - run: pipx run pyflakes organize.py
+      - run: pipx run pyflakes organize.py gui.py gui_check.py
       # 同定まわりのロジック検査。ネットワーク・PDF・OCR に触らないので ubuntu で動く。
       - run: python3 organize.py selftest
       # 再送層の実挙動。相手は localhost の偽サーバなので外に出ない。
@@ -16,3 +16,7 @@ jobs:
       - run: python3 index_check.py
       # ページの検証(有料 API)。偽のクライアントで --apply 無しに投入しないこと等。SDK もネットワークも使わない
       - run: python3 vet.py --selftest
+      # 検索の画面のサーバ。作り物の蔵書でループバックのサーバを叩く。外に出ない。
+      - run: python3 gui_check.py
+      # 画面の型検査と、配る JS(gui/dist)がソースから作り直したものと同じこと。
+      - run: python3 gui_check.py --dist

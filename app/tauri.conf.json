@@ -1,0 +1,9 @@
+{
+  "productName": "papers",
+  "version": "0.1.0",
+  "identifier": "io.github.paper-organizer.papers",
+  "app": {
+    "windows": [],
+    "security": { "csp": null }
+  }
+}

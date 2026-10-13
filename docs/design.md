@@ -330,6 +330,8 @@ up as a repeating `error` instead of a silent miss, but must be removed by hand)
 | `move` | Moves files and the index together, inside the library root only; stops on a name collision |
 | `relocate` | After files were moved by hand: matches missing records to new files by name and by a fingerprint of the stored text; ambiguous matches are reported, not applied. `scan` refuses to run if new files look like moved ones, since re-identifying them would orphan hand-made corrections |
 | `fix` | One record. Sets `rung` to `manual`, which later automatic passes do not override |
+| `remove` | Takes one file out of the library: marks the record and moves the file to a holding folder under the library root. The line stays in the index, because a new file is recognised by "its path is not in the index" and a deleted line would be indexed again by the next `add`. `undo` brings back the file and clears the mark |
+| `send` | Moves the file, the record and the cached full text to another library (`PAPERS_HOME`). The other index is written before the record is dropped here, so an interruption never leaves the record in neither. Refuses when one library keeps its PDFs inside the other's folder |
 | `review` / `merge` | A sheet of the files that need a person, with a suggested candidate where one is found. A candidate is written only when the person marks it `y` (or `m`: correct, but the file held is a pre-publication manuscript); `n` is remembered and not offered again; `x` marks the file as not a paper, which takes it out of the queue and out of the denominator of the resolution rate. A sheet with unmerged entries is never overwritten |
 | `views` | A separate folder of symlinks. On rebuild it deletes only a folder it created and that contains only links |
 
@@ -406,16 +408,17 @@ index (`papers.jsonl`); `text`, which identification uses, stays the first 3,000
 
 - **The key is made from the file's content** (its size and its first and last 64 KB). A key made from the path
   would force a re-read after every rename or move.
-- **Reading** uses `pdftotext`. If it does not finish in 30 seconds or fails, PDFKit reads the file instead. One
-  PDF in the author's library took 97 seconds for a single page with `pdftotext` and 0.1 seconds with PDFKit.
-- **PDFs with almost no text layer** (under 200 characters per page on average) are OCRed on every page.
+- **Reading** uses `pdftotext`. If it does not finish in 30 seconds or fails, PDFKit reads the file instead,
+  because `pdftotext` can take more than a minute for a single page (seen on one PDF in the author's library).
+- **PDFs with almost no text layer** (under 200 characters per page on average) are OCRed on every page. For each page,
+  whichever of the text layer and the OCR has more characters is kept.
 - **The search index has two tables.** `p` has the columns it always had; `f` has the same columns plus the full
   text. Records that match in `p` are listed first, in `p`'s order; records that match only in `f` follow.
 - **Why not one table.** bm25 divides by document length, so putting the full text in the same table lowers the
-  rank of long papers. For eight phrases on the author's library, 47 of the 80 top-10 results stayed the same with
-  one table (45 even with the full-text weight set to 0). With two tables all 80 stay.
-- For 60 words that occur only after the first 3,000 characters, the old index found 0; with the full text, 60
-  matched and 50 were in the top 10.
+  rank of long papers. On the author's library, about four in ten of the top-10 results changed with one table,
+  even with the full-text weight set to 0. With two tables the previous top results stay.
+- Input with no term of 3 or more characters (the substring path) is ordered the same way. An expression that names
+  the `fulltext:` column is ranked on `f` alone.
 - The search index is built under another name and then swapped in, so an interrupted build leaves the old one.
 
 ### Compared with Spotlight
@@ -446,6 +449,25 @@ this machine it did not index scanned pages. Caveats: the surname test is a subs
 a longer word also counts; the scan test uses words from this tool's own OCR, some of which may be misread; in the
 keyword test "on topic" means the words occur in the title or abstract held in the index, which is a mechanical
 proxy (for unidentified files the title read by the optional page check is used; files with neither count as off topic for both tools).
+
+### The search window (`papers gui`)
+
+A local HTTP server in Python (`gui.py`, standard library only) serves a small page; `app/` is an optional Tauri
+shell that shows the same page in its own window. The page is TypeScript checked by `tsc`, and the emitted
+JavaScript is committed, so running it needs no Node.
+
+- The server listens on 127.0.0.1 only, requires a per-launch token on every API call, accepts only its own
+  `Host`, returns library data only to POST requests, and sends a restrictive Content-Security-Policy. Strings
+  from the index are placed as text, never as HTML.
+- It reads the same index and search database as the command line and never rebuilds them. It writes in two
+  places only, after showing the change: correcting a record (the function behind `fix`) and filing a record
+  away (labelling its kind, `remove`, `send`).
+- It goes out to the network only to look up a DOI or an ISBN typed into the correction form, and only to fixed addresses for that
+  number. For a DOI: Crossref; if Crossref does not have it, doi.org (to learn the registration agency) and then DataCite or JaLC; arXiv
+  for an arXiv DOI. For an ISBN: the National Diet Library (Japanese books), Crossref and Open Library.
+- Each library is loaded as a separate instance of the code, so several can be searched side by side without
+  mixing their indexes. Results are listed per library and are not merged into one ranking.
+- `gui_check.py` drives the server against a made-up library and fails if anything tries to reach the network.
 
 ## 14. How the code is checked
 

@@ -42,14 +42,14 @@ def resolve_with(code_dir, paths):
 def base_copy(rev):
     """対照の版の organize.py を一時ディレクトリに取り出す(.cache は共有、vocr 等は今のもの)。"""
     d = tempfile.mkdtemp(prefix="rescan-base-")
-    repo = os.environ.get("PAPER_REPO", O.ROOT)          # mutate.py のコピーの中では元のリポジトリを使う
+    repo = os.environ.get("PAPER_REPO", O.CODE)          # mutate.py のコピーの中では元のリポジトリを使う
     src = subprocess.run(["git", "show", "%s:organize.py" % rev], cwd=repo, capture_output=True, text=True)
     if src.returncode != 0:
         sys.exit("対照の版 %s の organize.py を取り出せない: %s" % (rev, src.stderr.strip()))
     open(os.path.join(d, "organize.py"), "w").write(src.stdout)
     for f in ("vocr", "vocr.swift", "vec", "vec.swift"):
-        if os.path.exists(os.path.join(O.ROOT, f)):
-            shutil.copy2(os.path.join(O.ROOT, f), d)
+        if os.path.exists(os.path.join(O.CODE, f)):
+            shutil.copy2(os.path.join(O.CODE, f), d)
     os.symlink(O.CACHE, os.path.join(d, ".cache"))
     return d
 
@@ -64,7 +64,7 @@ def main(argv):
     if limit:
         paths = random.Random(20260923).sample(paths, min(limit, len(paths)))
     print("今のコードで %d 件を解き直す" % len(paths), file=sys.stderr)
-    new = resolve_with(O.ROOT, paths)
+    new = resolve_with(O.CODE, paths)
     key = lambda x: (x.get("rung"), (x.get("doi") or x.get("arxiv_id") or x.get("id") or "").lower())
     changed = [p for p in paths if key(recs[p]) != key(new.get(p, {}))]
     print("索引と違う %d 件を、対照の版(%s)でも解き直す" % (len(changed), rev), file=sys.stderr)

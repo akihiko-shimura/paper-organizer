@@ -207,8 +207,22 @@ To add new PDFs later, run `papers add` again. It only looks at files not yet in
 | `papers move NAME --to FOLDER` | Move files and update the index |
 | `papers relocate` | Repair the index after moving files by hand |
 | `papers undo` | Revert the last rename or move |
+| `papers remove NAME` | Take a file out of the library: hidden from search, moved to a holding folder |
+| `papers send NAME --to DB` | Move a file and its record to another library (`PAPERS_HOME`) |
+| `papers gui` | Search in a window (below) |
 
 Add `--json` to `search`, `has`, `info` and `recent` for one record per line. Full guide: [MANUAL.md](MANUAL.md).
+
+**The search window**
+
+`papers gui` starts a small server on 127.0.0.1 and opens it in your browser. `cargo run --manifest-path app/Cargo.toml`
+shows the same page in its own window (needs Rust), and `sh app/bundle.sh` builds a `papers.app` you can open from Finder (macOS; for the Mac it is built on).
+
+- It shows how many records match, where the terms appear in the full text (with the PDF page), a preview of the
+  pages (Space), and BibTeX.
+- It can correct a record (by DOI, or by hand), label a file that is not a paper, remove a file from the library,
+  or move it to another library. Every change is shown first and written only when you confirm.
+- Several libraries can be open side by side (`papers gui --db=<folder>`); each has its own list.
 
 **With Claude Code**
 
@@ -228,7 +242,8 @@ Both files are written in Japanese with English trigger phrases. Claude follows 
 ## Safety
 
 - **No PDF is ever deleted.** Duplicates are moved to a holding folder. Deleting them is up to you.
-- **Dry run by default.** `dedup`, `rename`, `move`, `relocate` and `fix` change nothing without `--apply`.
+- **Dry run by default.** `dedup`, `rename`, `move`, `relocate`, `fix`, `remove` and `send` change nothing without
+  `--apply`. The search window shows each change before writing it.
 - **Backup and undo.** The index is copied to `backups/` before it is rewritten. `papers undo` reverts the last
   rename or move.
 - **Paid calls need consent.** `vet.py` prints a cost estimate and sends nothing without `--apply`.
@@ -237,9 +252,12 @@ Both files are written in Japanese with English trigger phrases. Claude follows 
 
 | To | What | When |
 |---|---|---|
-| Crossref | DOIs; the first 300 characters of text and guessed titles, as queries; contact email if set | `add`, `scan`, `review`, `pubver`, `fix --doi` |
-| arXiv | arXiv IDs | `add`, `scan` |
+| Crossref | DOIs; the first 300 characters of text and guessed titles, as queries; contact email if set | `add`, `scan`, `review`, `pubver`, `fix --doi`, a DOI typed into the window's correction form |
+| arXiv | arXiv IDs | `add`, `scan`; an arXiv DOI given to `fix --doi` or typed into the window's correction form |
+| doi.org, DataCite, JaLC | A DOI that Crossref does not have (doi.org is asked which agency registered it, then that agency); contact email if set | `fix --doi`, a DOI typed into the window's correction form |
 | OpenAlex | DOIs; API key and contact email if set | `add` |
+| Crossref, Open Library | ISBNs from the copyright page, or an ISBN you give; in `review`, the file name without punctuation, as a query | `add`, `scan`, `review`, `merge` in a book database; `fix --isbn` and an ISBN typed into the window's correction form, in any database |
+| NDL Search, National Diet Library of Japan | ISBNs that start with 9784 | `add`, `scan`, `merge` in a book database; `fix --isbn` and an ISBN typed into the window's correction form |
 | Anthropic | An image of page 1 | Only `vet.py --apply` |
 
 The PDF files themselves are not uploaded. **Do not publish your index** (`papers.jsonl`) or the full

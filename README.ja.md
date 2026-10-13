@@ -206,9 +206,22 @@ papers index && papers views # 検索の索引と Finder 用のビューを作�
 | `papers move NAME --to FOLDER` | ファイルを移し、索引も更新 |
 | `papers relocate` | 手でファイルを動かしたあとの索引の修復 |
 | `papers undo` | 直前の改名または移動の取り消し |
+| `papers remove NAME` | ファイルを蔵書から外す（検索に出さず、保留フォルダへ移す） |
+| `papers send NAME --to DB` | ファイルと記録を、別の蔵書（`PAPERS_HOME`）へ移す |
+| `papers gui` | 画面で検索する（下記） |
 
 `search`、`has`、`info`、`recent` に `--json` を付けると、1 行 1 記録で出力します。詳しい手引きは
 [MANUAL.ja.md](MANUAL.ja.md) です。
+
+**検索の画面**
+
+`papers gui` は 127.0.0.1 に小さなサーバを立て、ブラウザで開きます。`cargo run --manifest-path app/Cargo.toml` は、同じ画面を
+専用の窓で開きます（Rust が必要です）。`sh app/bundle.sh` は、Finder から開ける `papers.app` を作ります（macOS。作った Mac 用）。
+
+- 何件当たったか、語が全ページの本文のどこに出るか（PDF の何ページ目か）、ページのプレビュー（space）、BibTeX を表示します。
+- 記録を直す（DOI で、または手で）、論文でないファイルに種類を付ける、ファイルを蔵書から外す、別の蔵書へ移す、ができます。
+  どの変更も先に内容を見せ、確かめてから書きます。
+- 複数の蔵書を並べて開けます（`papers gui --db=<フォルダ>`）。一覧は蔵書ごとに分かれます。
 
 **Claude Code と使う**
 
@@ -226,7 +239,8 @@ ln -s "$PWD/agents/paper-librarian.md" ~/.claude/agents/paper-librarian.md
 ## 安全性
 
 - **PDF を削除することはありません。** 重複は保留フォルダへ移します。削除するかどうかは、あなたが決めます。
-- **既定は dry run です。** `dedup`、`rename`、`move`、`relocate`、`fix` は、`--apply` を付けるまで何も変更しません。
+- **既定は dry run です。** `dedup`、`rename`、`move`、`relocate`、`fix`、`remove`、`send` は、`--apply` を付けるまで何も
+  変更しません。検索の画面は、変更の内容を見せてから書きます。
 - **バックアップと取り消し。** 索引は、書き換える前に `backups/` へコピーします。`papers undo` は、直前の改名または
   移動を元に戻します。
 - **有料の呼び出しには同意が必要です。** `vet.py` は費用の見積もりを表示し、`--apply` がなければ何も送信しません。
@@ -235,9 +249,12 @@ ln -s "$PWD/agents/paper-librarian.md" ~/.claude/agents/paper-librarian.md
 
 | 送り先 | 送るもの | いつ |
 |---|---|---|
-| Crossref | DOI。検索クエリとして、本文の最初の 300 文字と推測した表題。設定していれば連絡先のメールアドレス | `add`, `scan`, `review`, `pubver`, `fix --doi` |
-| arXiv | arXiv ID | `add`, `scan` |
+| Crossref | DOI。検索クエリとして、本文の最初の 300 文字と推測した表題。設定していれば連絡先のメールアドレス | `add`, `scan`, `review`, `pubver`, `fix --doi`、検索の画面の「直す」に入れた DOI |
+| arXiv | arXiv ID | `add`, `scan`。`fix --doi` と、検索の画面の「直す」に入れた arXiv の DOI |
+| doi.org、DataCite、JaLC | Crossref に無い DOI（doi.org に登録機関を聞き、その機関から引く）。設定していれば連絡先のメールアドレス | `fix --doi`、検索の画面の「直す」に入れた DOI |
 | OpenAlex | DOI。設定していれば API キーと連絡先のメールアドレス | `add` |
+| Crossref、Open Library | 著作権の頁の ISBN、または利用者が入れた ISBN。`review` では、検索クエリとして、ファイル名から記号を除いた語 | 書籍の DB の `add`, `scan`, `review`, `merge`。どの DB でも、`fix --isbn` と、検索の画面の「直す」に入れた ISBN |
+| 国立国会図書館サーチ | 9784 で始まる ISBN | 書籍の DB の `add`, `scan`, `merge`。`fix --isbn` と、検索の画面の「直す」に入れた ISBN |
 | Anthropic | 1 ページ目の画像 | `vet.py --apply` のときだけ |
 
 PDF ファイルそのものは、アップロードしません。**索引（`papers.jsonl`）と全ページの本文（`fulltext/`）を公開しないでください。**

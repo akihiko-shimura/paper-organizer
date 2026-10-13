@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>papers</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <input id="q" type="search" autocomplete="off" autocapitalize="off" spellcheck="false">
+  <label><input id="all" type="checkbox" checked> <span id="all-label"></span></label>
+  <span id="count"></span>
+  <button id="lib-open" type="button"></button>
+</header>
+<div id="filters">
+  <span id="dbs"></span>
+  <label><span id="year-label"></span> <input id="year-from" type="text" inputmode="numeric" maxlength="4"> – <input id="year-to" type="text" inputmode="numeric" maxlength="4"></label>
+  <label><span id="sort-label"></span>
+    <select id="sort">
+      <option value="relevance"></option>
+      <option value="newest"></option>
+      <option value="oldest"></option>
+      <option value="author"></option>
+    </select>
+  </label>
+  <span id="facets"></span>
+</div>
+<p id="notes"></p>
+<p id="picks"></p>
+<main>
+  <section id="list"></section>
+  <section id="detail"></section>
+  <section id="preview" hidden></section>
+</main>
+<footer id="keys"></footer>
+<dialog id="edit">
+  <h2 id="edit-title"></h2>
+  <label><span id="edit-l-doi"></span> <input id="edit-doi" type="text" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
+  <label><span id="edit-l-title"></span> <input id="edit-f-title" type="text"></label>
+  <label><span id="edit-l-authors"></span> <input id="edit-f-authors" type="text"></label>
+  <label><span id="edit-l-first_author"></span> <input id="edit-f-first_author" type="text"></label>
+  <label><span id="edit-l-year"></span> <input id="edit-f-year" type="text" inputmode="numeric" maxlength="4"></label>
+  <label><span id="edit-l-journal"></span> <input id="edit-f-journal" type="text"></label>
+  <p id="edit-hint" class="note"></p>
+  <pre id="edit-out"></pre>
+  <div class="actions">
+    <button id="edit-check" type="button"></button>
+    <button id="edit-write" type="button"></button>
+    <button id="edit-cancel" type="button"></button>
+  </div>
+</dialog>
+<dialog id="tidy">
+  <h2 id="tidy-title"></h2>
+  <label><span id="tidy-l-kind"></span> <select id="tidy-kind"></select></label>
+  <label><span id="tidy-l-to"></span> <select id="tidy-to"></select></label>
+  <p id="tidy-hint" class="note"></p>
+  <pre id="tidy-out"></pre>
+  <div class="actions">
+    <button id="tidy-check" type="button"></button>
+    <button id="tidy-write" type="button"></button>
+    <button id="tidy-cancel" type="button"></button>
+  </div>
+</dialog>
+<dialog id="lib">
+  <h2 id="lib-title"></h2>
+  <pre id="lib-out"></pre>
+  <div class="actions">
+    <button id="lib-close" type="button"></button>
+  </div>
+</dialog>
+<script type="module" src="/dist/app.js"></script>
+</body>
+</html>

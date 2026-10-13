@@ -27,13 +27,18 @@ selftest に入れないのは意図(CLAUDE.md): ここは一時ディレクト�
      同じ秒に 2 回動かしても、前の記録を上書きしない
   R. nonpaper は既定で動かさない。nonpaper-ok は索引に無いパス・知らない種類があれば書かない。--apply で退避してから
      ファイルと索引を一緒に動かし、undo で戻る。nonpaper-page は頁数を調べて索引に書き、候補だけをページに出す
+  W. remove は既定で動かさない。--apply で退避してから、ファイルを置き場の下の決まったフォルダへ移して印を付ける。undo で戻り、印も消える。
+     send は、ファイル・記録・全頁の本文を別の DB へ移す。相手の索引に書いてからこちらを外す。途中で失敗しても、動かした分は両方に書く
+  U. コードと HANDOFF.md が節の名前で指している DESIGN.md の節は実在する
+  X. 書籍の DB(config.json の books)は、exclude のフォルダを見ず、著作権の頁の ISBN を目録で引き、表題が PDF に無ければ採らない。
+     同定できなかった本を知らせ、重複の集約と論文以外の移動はしない。review・merge で人が決め、改名は表(rename.tsv)を直してから
   T. 全頁の本文(fulltext/)は中身から作る鍵で置き、改名しても読み直さない。読めないファイルは置かない。テキスト層の乏しい
      ファイルは全頁を OCR する。検索の索引は別名で作ってから置き換える。今の表で当たる記録が先に並ぶ。--kind で種類を絞る
 C は規約 1 の機械化: 新しい書き込み経路を足すと、ここで名指しで落ちる。
 許可リストに足すなら、なぜ _atomic_write を通さなくてよいかをコメントに書くこと。
 実行: python3 index_check.py
 """
-import ast, glob, json, os, tempfile, time
+import ast, glob, json, os, re, tempfile, time
 
 import organize as O
 
@@ -79,6 +84,52 @@ def write(path, recs):
     with open(path, "w") as f:
         for r in recs:
             f.write(json.dumps(r) + "\n")
+
+
+def pointer_hits(name, heads):
+    """節の名前 name が指す見出し。見出しの先頭から(番号は飛ばしてもよい)、区切り(末尾・括弧・コロン・空白・読点)まで一致するもの。"""
+    out = []
+    for h in heads:
+        for cand in (h, re.sub(r'^[\d.]+[a-z]? ', '', h)):
+            if cand.startswith(name) and (len(cand) == len(name) or cand[len(name)] in "（(:： 、"):
+                out.append(h)
+                break
+    return out
+
+
+def check_pointers(root=None):
+    """U. コードと HANDOFF.md が DESIGN.md を節の名前で指しているとき(規約 7: 正本は 1 つ、ほかは指すだけ)、その名前の節が
+    ちょうど 1 つ在る。節の名前を変える・節を消す・同じ名前で始まる節を足すと、指している側がここで名指しで落ちる。
+    DESIGN.md も HANDOFF.md も無い場所(公開用の書き出し先)では見ない。見るのは名前だけ(DESIGN.md「節の名前で指す先の検査」)。"""
+    root = root or os.path.dirname(os.path.abspath(__file__))
+    design, handoff = os.path.join(root, "DESIGN.md"), os.path.join(root, "HANDOFF.md")
+    if not os.path.exists(design) and not os.path.exists(handoff):
+        print("U skip: DESIGN.md も HANDOFF.md も無い(公開用の書き出し先)")
+        return
+    assert os.path.exists(design), "HANDOFF.md は在るのに DESIGN.md が無い(指す先を確かめられない)"
+    heads = re.findall(r'^#{2,4} (.+)$', open(design).read(), re.M)
+    ptr = re.compile(r'(?<![A-Za-z_])DESIGN\.md(?: の)?「([^」]+)」')        # GUI_DESIGN.md「…」は別の文書
+    bad, n = [], 0
+    for f in sorted(glob.glob(os.path.join(root, "*.py")) + glob.glob(os.path.join(root, "*.swift")) + [handoff]):
+        if not os.path.exists(f):
+            continue
+        text = open(f).read()
+        names = ptr.findall(text)
+        if f == handoff:                                      # 未対処の一覧は、行末の（「節」「節」…）と「以下は「節」の節」でも指す
+            body = text[text.index("## 未対処の一覧"):]
+            body = body[:body.index("\n## ", 5)]
+            for group in re.findall(r'（((?:「[^」]+」)+)', body):
+                names += re.findall(r'「([^」]+)」', group)
+            names += re.findall(r'以下は「([^」]+)」の節', body)
+        for name in names:
+            name = re.sub(r'\n#? *', '', name)                 # 文書・コメントの行の折り返し
+            n += 1
+            hits = pointer_hits(name, heads)
+            if len(hits) != 1:
+                bad.append("%s: 「%s」 → %s" % (os.path.basename(f), name, "無い" if not hits else "複数: " + " / ".join(hits)))
+    assert not bad, "DESIGN.md の節をちょうど 1 つ指していない:\n  " + "\n  ".join(bad)
+    assert n, "節の名前で指している箇所が 1 つも見つからない(この検査が対象を見ていない)"
+    print("U ok: コードと HANDOFF.md が指す DESIGN.md の節 %d か所は、どれもちょうど 1 つ在る" % n)
 
 
 def check_crash(d):
@@ -266,19 +317,30 @@ def check_link(d):
     import subprocess, sys
     link = os.path.join(d, "papers")
     os.symlink(os.path.join(os.path.dirname(os.path.abspath(__file__)), "organize.py"), link)
-    env = {k: v for k, v in os.environ.items() if k != "INDEX"}
+    env = {k: v for k, v in os.environ.items() if k not in ("INDEX", "PAPERS_HOME")}
     r = subprocess.run([sys.executable, link, "selftest"], cwd=d, env=env, capture_output=True, text=True)
-    root = subprocess.run([sys.executable, "-c", "import runpy; print(runpy.run_path(%r)['ROOT'])" % link],
-                          cwd=d, env=env, capture_output=True, text=True).stdout.strip()
-    assert r.returncode == 0 and root == os.path.dirname(os.path.abspath(__file__)), \
-        "リンク経由で ROOT がリンクの場所(%s)になる" % root
+    here = os.path.dirname(os.path.abspath(__file__))
+    show = "import runpy, json; m = runpy.run_path(%r); print(json.dumps([m[k] for k in ('CODE', 'ROOT', 'INDEX', 'DB', 'FULLTEXT', 'CACHE', 'VIEWS')]))" % link
+    where = lambda e: subprocess.run([sys.executable, "-c", show], cwd=d, env=e, capture_output=True, text=True)
+    root, views = json.loads(where(env).stdout)[1], json.loads(where(env).stdout)[6]
+    assert r.returncode == 0 and root == here, "リンク経由で ROOT がリンクの場所(%s)になる" % root
+    # PAPERS_HOME は DB の置き場だけを変える: 索引・検索の索引・全頁の本文・キャッシュはその下、本体(型・道具)は元の場所
+    home = os.path.realpath(os.path.join(d, "h-home"))
+    os.makedirs(home)
+    got = json.loads(where(dict(env, PAPERS_HOME=home)).stdout)
+    assert got[0] == here and got[1] == home and all(os.path.dirname(p) == home for p in got[2:6]), "PAPERS_HOME で DB の置き場が変わらない: %s" % got
+    assert got[6] == views + "-h-home", "別の DB のビューの出力先が、いつもの DB と同じ(片方がもう片方を消す): %s" % got[6]
+    open(os.path.join(home, "config.json"), "w").write('{"views": "%s"}' % os.path.join(d, "own-views"))
+    assert json.loads(where(dict(env, PAPERS_HOME=home)).stdout)[6] == os.path.join(d, "own-views"), "DB のフォルダの config.json の views が効かない"
+    gone = where(dict(env, PAPERS_HOME=os.path.join(d, "no-such-home")))
+    assert gone.returncode != 0 and "PAPERS_HOME" in gone.stderr and "Traceback" not in gone.stderr, "無いフォルダの PAPERS_HOME で止まらない: %s" % gone.stderr[-200:]
     # 索引がまだ無いとき(初めての利用者)、読むコマンドは例外で落ちずに、最初の手順を出して止まる
     env2 = dict(env, INDEX=os.path.join(d, "no-such-index.jsonl"))
     for cmd in ("info", "search", "stats", "has", "rename", "dedup"):
         q = subprocess.run([sys.executable, link, cmd, "x"], cwd=d, env=env2, capture_output=True, text=True)
         assert q.returncode != 0 and "papers add" in q.stderr and "Traceback" not in q.stderr, \
             "索引が無いときに %s が案内を出さずに落ちる: %s" % (cmd, q.stderr[-200:])
-    print("H ok: リンク経由でも ROOT は本体。索引が無ければ最初の手順を出して止まる")
+    print("H ok: リンク経由でも ROOT は本体。PAPERS_HOME は DB の置き場だけを変える。索引が無ければ最初の手順を出して止まる")
 
 
 def stub_db(path, fmt=None):
@@ -323,24 +385,27 @@ def check_info(d):
 def check_rename_pointers(d):
     """J. 一時ディレクトリで rename --apply と undo を回し、重複の記録が指す先がファイルと一緒に動くかを見る。"""
     root = os.path.join(d, "j"); lib = os.path.join(root, "lib"); os.makedirs(os.path.join(lib, "_dup"))
-    keep, dup = os.path.join(lib, "old.pdf"), os.path.join(lib, "_dup", "old.pdf")
-    for f in (keep, dup):
+    keep, dup, thesis = os.path.join(lib, "old.pdf"), os.path.join(lib, "_dup", "old.pdf"), os.path.join(lib, "My thesis.pdf")
+    for f in (keep, dup, thesis):
         open(f, "w").write("%PDF")
     O.ROOT, O.INDEX = root, os.path.join(root, "j.jsonl")
     base = {"rung": "text_doi", "source": "crossref", "year": 2016, "first_author": "Miller", "journal": "ACS Nano",
             "volume": "10", "pages": "2803-2818", "doi": "10.1/x"}
     write(O.INDEX, [dict(base, path=keep, folder=lib, filename="old.pdf"),
-                    dict(base, path=dup, folder=os.path.dirname(dup), filename="old.pdf", duplicate_of=keep)])
+                    dict(base, path=dup, folder=os.path.dirname(dup), filename="old.pdf", duplicate_of=keep),
+                    {"rung": "manual", "source": "manual", "year": 2017, "first_author": "Tester", "title": "T",
+                     "path": thesis, "folder": lib, "filename": "My thesis.pdf"}])
     O.sys.argv = ["organize.py", "rename", "--apply"]
     O.rename()
     by = {r["filename"]: r for r in map(json.loads, open(O.INDEX))}
     new = by["2016_Miller_ACSNano_10_2803.pdf"]["path"]
     assert os.path.exists(new) and by["old.pdf"]["duplicate_of"] == new, "改名したファイルを指す項目が古いパスのまま"
+    assert os.path.exists(thesis) and by["My thesis.pdf"]["path"] == thesis, "誌名の無い記録(人が直した学位論文・本)を改名した"
     O.sys.argv = ["organize.py", "undo"]
     O.undo()
     by = {r["path"]: r for r in map(json.loads, open(O.INDEX))}
     assert by[dup]["duplicate_of"] == keep and os.path.exists(keep), "undo で指す先が戻らない"
-    print("J ok: rename と undo は、動かしたファイルを指す項目も書き換える")
+    print("J ok: rename と undo は、動かしたファイルを指す項目も書き換える、誌名の無い記録は改名しない")
 
 
 def check_relocate(d):
@@ -584,9 +649,10 @@ def check_retry(d):
     open(far["path"], "w").write("%PDF")
     start = [rec("lost", rung="error", error="外部から取れなかった: arxiv:1", fetch_failed=["arxiv:1"], text="Lost paper"),
              rec("broken", rung="error", error="broken pdf"), good, far]
-    real, calls, answer = (O.resolve, O.enrich, O.build_db), [], {}
+    real, calls, answer = (O.resolve, O.enrich, O.build_db, O._ptext), [], {}
     O.resolve = lambda p: calls.append(os.path.basename(p)) or dict(answer, path=p, folder=lib, filename=os.path.basename(p))
     O.enrich = lambda: None
+    O._ptext = lambda: None                    # Swift の道具は作らない・使わない(本体の場所から探すので、置き場を変えても止まらない。CI には無い)
     O.build_db = lambda: open(O.DB, "w").close()
     load = lambda: [json.loads(l) for l in open(O.INDEX)]
     try:
@@ -616,7 +682,7 @@ def check_retry(d):
             O.add()
         assert calls == ["lost.pdf", "lost.pdf"], "取れた記録・読み取りのエラーをもう一度同定した"
     finally:
-        O.resolve, O.enrich, O.build_db = real
+        O.resolve, O.enrich, O.build_db, O._ptext = real
     print("P ok: 取れなかった記録だけを取り直す、行を増やさない、外す前に退避する、取れたら新しい記録として報告する")
 
 
@@ -1260,6 +1326,7 @@ def check_fulltext(d):
                 "--mode=vec で来た記録に「全頁の本文でだけ」の印を付けた"
             O._vec = lambda c, q, n: []
             assert names(search("gadget", "--mode=hybrid")) == ["long"], "--mode=hybrid の語の側が、全頁の本文でだけ当たる記録を足している(今までと順位が変わる)"
+            assert names(search("QZ", "--mode=hybrid")) == ["book"], "--mode=hybrid の語の側が、3 文字以上の語が無い入力で全頁の本文を見ている"
         finally:
             O._vec = real_vec
         try:
@@ -1317,8 +1384,389 @@ def check_fulltext(d):
           "検索の索引は別名で作って置き換える、今の表で当たる記録が先、種類で絞れる")
 
 
+def check_remove_send(d):
+    """W. 一時ディレクトリの 2 つの DB で、DB から外す(remove)・undo・別の DB へ送る(send)・送り返す、を回す。"""
+    import contextlib, io
+    root, home2, lib2 = os.path.join(d, "w"), os.path.join(d, "w2"), os.path.join(d, "w2-lib")
+    lib = os.path.join(root, "lib")
+    os.makedirs(os.path.join(lib, "sub")); os.makedirs(os.path.join(lib, "_dup")); os.makedirs(home2)
+    O.ROOT, O.INDEX, O.FULLTEXT = root, os.path.join(root, "papers.jsonl"), os.path.join(root, "fulltext")
+    P = {n: os.path.join(lib, n) for n in ("junk.pdf", "sub/junk.pdf", "thesis.pdf", "keep.pdf", "gone.pdf", "_dup/keep.pdf", "more.pdf")}
+    for n, p in P.items():
+        open(p, "w").write("%PDF " + n)                     # 中身を変える(全頁の本文の鍵は中身から作る)
+    rec = lambda n, **k: dict({"path": P[n], "folder": os.path.dirname(P[n]), "filename": os.path.basename(n), "rung": "unresolved", "source": None}, **k)
+    resolved = dict(rung="text_doi", source="crossref", year=2001, first_author="Example", journal="J", doi="10.1/k")
+    write(O.INDEX, [rec("junk.pdf"), rec("sub/junk.pdf"), rec("thesis.pdf", not_paper="user", kind="thesis"), rec("keep.pdf", **resolved),
+                    rec("gone.pdf"), rec("_dup/keep.pdf", duplicate_of=P["keep.pdf"], **resolved), rec("more.pdf")])
+    os.remove(P["gone.pdf"])
+    O._fulltext_save(O._file_key(P["thesis.pdf"]), "pdftotext", ["page one", "page two"], False)
+    recs = lambda index=None: {r["path"]: r for r in map(json.loads, open(index or O.INDEX))}
+    files = lambda top: sorted(os.path.relpath(os.path.join(dp, f), top) for dp, _, fs in os.walk(top) for f in fs)
+    kept = lambda home, tag: glob.glob(os.path.join(home, "backups", "*-before-%s.jsonl" % tag))
+    def run(M, fn, *a):
+        M.sys.argv = ["organize.py", fn] + list(a)
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                getattr(M, fn)()
+            return "ok"
+        except SystemExit:
+            return "exit"
+        except OSError:
+            return "error"
+    away = os.path.join(lib, O.REMOVED_DIR)
+
+    # --- remove ---
+    before, on_disk = open(O.INDEX).read(), files(lib)
+    assert run(O, "remove", P["junk.pdf"]) == "ok" and open(O.INDEX).read() == before and files(lib) == on_disk and not kept(root, "remove"), \
+        "--apply 無しで外した(索引かファイルが変わった)"
+    for bad in ("keep.pdf", "_dup/keep.pdf"):               # ほかの記録が指している記録・脇へ移した記録
+        assert run(O, "remove", P[bad], "--apply") == "exit" and open(O.INDEX).read() == before and files(lib) == on_disk, "外せない記録を外した: " + bad
+    assert run(O, "remove", P["junk.pdf"], P["sub/junk.pdf"], "--apply") == "ok"
+    got = recs()
+    a, b = os.path.join(away, "junk.pdf"), os.path.join(away, "junk_2.pdf")
+    assert os.path.exists(a) and os.path.exists(b) and not os.path.exists(P["junk.pdf"]) and not os.path.exists(P["sub/junk.pdf"]), files(lib)
+    assert all(got[p]["removed"] == "user" and got[p]["folder"] == away and O.moved_aside(got[p]) for p in (a, b)), "外した記録に印が無い・パスが古い"
+    assert open(a).read() == "%PDF junk.pdf" and open(b).read() == "%PDF sub/junk.pdf", "同じ名前の 2 つ目が 1 つ目を上書きした"
+    assert len(kept(root, "remove")) == 1 and open(kept(root, "remove")[0]).read() == before and len(got) == 7, "外す前に退避していない・行が減った"
+    assert run(O, "undo") == "ok"
+    got = recs()
+    assert os.path.exists(P["junk.pdf"]) and os.path.exists(P["sub/junk.pdf"]) and "removed" not in got[P["junk.pdf"]] \
+        and "removed" not in got[P["sub/junk.pdf"]] and not O.moved_aside(got[P["junk.pdf"]]), "undo で、外したファイルか印が戻らない"
+    n_trails = len(glob.glob(os.path.join(root, "renames-*.jsonl")))
+    assert run(O, "remove", P["gone.pdf"], "--apply") == "ok" and recs()[P["gone.pdf"]]["removed"] == "user" \
+        and len(glob.glob(os.path.join(root, "renames-*.jsonl"))) == n_trails, "ファイルの無い記録に印を付けない、または空の記録を書いた(直前の移動を undo で戻せなくなる)"
+
+    # --- send ---
+    open(os.path.join(home2, "config.json"), "w").write(json.dumps({"library": lib2}))
+    was = os.environ.get("INDEX")
+    os.environ["INDEX"] = O.INDEX                           # この過程の索引の場所を変える環境変数。別の DB には引き継がない
+    try:
+        env = dict(os.environ)
+        B = O.other_db(home2)
+        assert dict(os.environ) == env, "別の DB を読み込んだ後、環境変数を元に戻していない"
+    finally:
+        os.environ.pop("INDEX", None) if was is None else os.environ.update(INDEX=was)
+    assert B.ROOT == os.path.realpath(home2) and B.INDEX == os.path.join(B.ROOT, "papers.jsonl") and B.INDEX != O.INDEX, \
+        "別の DB が、環境変数 INDEX の索引を指す(2 つの DB が同じ索引のファイルを書く): %s" % B.INDEX
+    assert B.library_of([]) == lib2, "別の DB の論文の置き場を、その DB の config.json の library から読まない: %s" % B.library_of([])
+    before, on_disk = open(O.INDEX).read(), files(lib)
+    assert run(O, "send", P["thesis.pdf"], "--to", home2) == "ok" and open(O.INDEX).read() == before and files(lib) == on_disk \
+        and not os.path.exists(B.INDEX) and not os.path.exists(lib2), "--apply 無しで送った"
+    for bad, to in ((P["keep.pdf"], home2), (P["gone.pdf"], home2), (P["thesis.pdf"], os.path.join(d, "no-such-db")), (P["thesis.pdf"], root)):
+        assert run(O, "send", bad, "--to", to, "--apply") == "exit" and open(O.INDEX).read() == before and files(lib) == on_disk, \
+            "送れない記録・行き先(指されている記録・外した記録・無い DB・自分自身)へ送った: %s → %s" % (bad, to)
+    inner = os.path.join(d, "w3")
+    os.makedirs(inner)
+    open(os.path.join(inner, "config.json"), "w").write(json.dumps({"library": os.path.join(lib, "inside")}))
+    assert run(O, "send", P["thesis.pdf"], "--to", inner, "--apply") == "exit" and files(lib) == on_disk, "相手の置き場がこちらの置き場の中なのに送った"
+    assert run(O, "send", P["thesis.pdf"], "--to", home2, "--apply") == "ok"
+    there = os.path.join(lib2, O.KINDS["thesis"][1], "thesis.pdf")
+    here, got2 = recs(), recs(B.INDEX)
+    assert open(there).read() == "%PDF thesis.pdf" and not os.path.exists(P["thesis.pdf"]), "ファイルが相手の置き場(種類のフォルダ)へ移っていない"
+    assert P["thesis.pdf"] not in here and len(here) == 6 and list(got2) == [there] and got2[there]["kind"] == "thesis" \
+        and got2[there]["folder"] == os.path.dirname(there), "記録が相手の索引へ移っていない・こちらに残っている: %s" % list(got2)
+    assert B._fulltext_load(B._file_key(there))["pages"] == ["page one", "page two"], "全頁の本文が相手の DB に写っていない(相手で OCR し直すことになる)"
+    assert len(kept(root, "send")) == 1 and open(kept(root, "send")[0]).read() == before and glob.glob(os.path.join(root, "sends-*.jsonl")), \
+        "送る前にこちらの索引を退避していない・送った記録を書き残していない"
+    # 2 件を送り、2 件目の移動で失敗させる: 1 件目は相手に入ってこちらから消え、2 件目はこちらに残る(どちらにも無い記録を作らない)
+    real, calls = O._move_file, []
+    def flaky(src, dst):
+        calls.append(src)
+        if len(calls) == 2:
+            raise OSError("disk trouble")
+        return real(src, dst)
+    O._move_file = flaky
+    try:
+        assert run(O, "send", P["junk.pdf"], P["more.pdf"], "--to", home2, "--apply") == "error"
+    finally:
+        O._move_file = real
+    here, got2 = recs(), recs(B.INDEX)
+    assert os.path.join(lib2, "junk.pdf") in got2 and P["junk.pdf"] not in here and P["more.pdf"] in here and os.path.exists(P["more.pdf"]) \
+        and len(got2) == 2 and len(here) == 5, "途中で失敗したとき、動かした分だけが両方の索引に書かれていない"
+    assert len(kept(home2, "receive")) == 1, "相手の索引を、足す前に退避していない"
+    # 送り返す: 相手の DB から同じ命令で戻せる
+    assert run(B, "send", there, "--to", root, "--apply") == "ok"
+    back = os.path.join(lib, O.KINDS["thesis"][1], "thesis.pdf")
+    assert back in recs() and there not in recs(B.INDEX) and open(back).read() == "%PDF thesis.pdf", "相手の DB から送り返せない"
+    print("W ok: remove は既定で動かさない、退避してから移して印を付ける、上書きしない、undo で印ごと戻る。send は相手に書いてからこちらを外す、"
+          "全頁の本文も写す、途中で失敗しても動かした分は両方に書く、送り返せる")
+
+
+def check_books(d):
+    """X. 書籍の DB(config.json の books)。PDF の読み取り・OCR・目録への問い合わせは差し替える。"""
+    import contextlib, io
+    root = os.path.join(d, "x"); lib = os.path.join(root, "lib")
+    for sub in ("", "その他/deep", "errata", "keep"):
+        os.makedirs(os.path.join(lib, sub), exist_ok=True)
+    saved = {k: getattr(O, k) for k in ("ROOT", "INDEX", "DB", "FULLTEXT", "CACHE", "REVIEW_TSV", "RENAME_TSV", "BOOKS", "EXCLUDE", "_book_pages", "pdf_pages",
+                                        "_ocr_pages", "get_json", "get_text", "from_arxiv", "_embed", "_run_text", "_ptext", "_vocr")}
+    O.ROOT, O.INDEX, O.DB, O.FULLTEXT = root, os.path.join(root, "x.jsonl"), os.path.join(root, "x.db"), os.path.join(root, "fulltext")
+    O.CACHE, O.REVIEW_TSV, O.RENAME_TSV = os.path.join(root, ".cache"), os.path.join(root, "unresolved.tsv"), os.path.join(root, "rename.tsv")
+    f = lambda name: os.path.join(lib, name)
+    W, V = "9780000000019", "9783000000010"
+    cpage = "Copyright © 2009 by John Wiley & Sons. All rights reserved. Second edition. ISBN 978-0-00-000001-9 (cloth)"
+    long = "IMAGINARY OPTICS Anna M. Writer Example University " + "body text " * 200
+    # ファイル → 文字の層の頁。scan は層が無い(OCR で読む)。nois は層はあるが ISBN が無い。fail は目録に届かない
+    layer = {"Writer - Imaginary Optics 3rd ed 2009.pdf": ["", long, "Related titles ISBN " + V, cpage],
+             "scan.pdf": ["", ""], "nois.pdf": [long, long], "fail.pdf": [long, cpage.replace("978-0-00-000001-9", "978-3-00-000001-0")],
+             "2101.00002v4.pdf": ["Notes on Imaginary Entropy arXiv:2101.00002v4 [q-bio.PE] Max Mustermann 2020 " + "body text " * 100, long],
+             "wrong.pdf": ["Some Other Book entirely " * 30, cpage],
+             # 論文の補足資料の書き出しに似た本。著作権の頁の 1 つ目の ISBN(電子版)は目録に無く、2 つ目で引ける
+             "supp.pdf": ["Supplementary Material for the lecture " + long, cpage.replace("ISBN 978", "ISBN 978-0-00-000002-6 (ebook) ISBN 978")],
+             "ten.pdf": ["Ten Digit Book by A. Tenner " + "body text " * 200, "© 1990 All rights reserved. ISBN 0-00-000006-X"],   # 目録は 10 桁で持つ
+             "2101.00001.pdf": ["Notes that never name the author " * 40, long],             # arXiv の番号の名前だが、著者が本文に無い
+             "wasyo.pdf": ["架空太郎のC++入門 " + "本文 " * 400, "2019年9月 発行 架空出版 ISBN 978-4-00-000001-7"]}
+    for name in list(layer) + ["その他/deep/skip.pdf", "errata/skip2.pdf", "keep/in.pdf"]:
+        open(f(name), "w").write("%PDF " + name)
+    ocred, asked, misplaced = [], [], []
+    O._book_pages = lambda path, n: list(enumerate(layer.get(os.path.basename(path), [long]), 1))
+    O.pdf_pages = lambda path: 300
+    def ocr_pages(path, first, last):
+        ocred.append((os.path.basename(path), first, last))
+        return {1: "IMAGINARY OPTICS", 2: cpage}
+    O._ocr_pages = ocr_pages
+    cr_item = {"DOI": "10.9999/imaginary-optics", "type": "monograph", "title": ["Imaginary Optics"], "publisher": "Wiley",
+               "author": [{"family": "Writer", "given": "Anna M."}], "published": {"date-parts": [[2008, 10, 28]]}, "ISBN": [W]}
+    def get_json(url):
+        asked.append(url)
+        if V in url:
+            raise OSError("timed out")                      # 応答の無い失敗(取り直せる)
+        if "api.crossref.org/works?" in url and url.endswith("isbn:" + W):
+            assert all("type:" + t in url for t in O.BOOK_TYPES), "Crossref を本の種類に絞らずに引いた(章・前付けが先に返る)"
+            return {"message": {"items": [cr_item]}}
+        if "api.crossref.org/works?" in url and url.endswith("isbn:000000006X"):
+            return {"message": {"items": [{"DOI": "10.1/ten", "type": "book", "title": ["Ten Digit Book"], "author": [{"family": "Tenner", "given": "A."}],
+                                           "ISBN": ["000000006X"]}]}}                       # 目録に年が無い
+        if "query.bibliographic=" in url or "search.json" in url:   # 検索の語は URL の末尾(キャッシュの名前は末尾から作る)。候補の取得は例外を握るので、後で見る
+            if "&" in url.split("query.bibliographic=" if "crossref" in url else "&q=")[-1]:
+                misplaced.append(url)
+        if ",isbn:" in url or "query.bibliographic" in url:
+            return {"message": {"items": []}}
+        if "api.crossref.org/works/10.9999" in url:
+            return {"message": dict(cr_item, type="book-chapter") if "ch1" in url else cr_item}
+        if "openlibrary.org/api/books" in url:
+            return {"ISBN:" + W: {"title": "Imaginary optics", "authors": [{"name": "Anna Writer"}], "publish_date": "2009"}} if W in url else {}
+        if "openlibrary.org/search.json" in url:
+            return {"docs": [{"title": "Imaginary Optics", "author_name": ["Anna Writer"], "first_publish_year": 2009},
+                             {"title": "Body Text", "author_name": ["Nobody Else"], "first_publish_year": 1990},
+                             {"title": "Quantum Chaos", "author_name": ["Anna Writer"], "first_publish_year": 1991}]}
+        raise AssertionError("unexpected lookup: " + url)
+    O.get_json = get_json
+    ndl = "<rss><channel><item><dc:title>架空太郎のC++入門</dc:title><dc:creator>架空, 太郎</dc:creator><dcterms:issued>2019.9</dcterms:issued></item></channel></rss>"
+    O.get_text = lambda url, **k: asked.append(url) or (ndl if "isbn=9784000000017" in url else "<rss></rss>")
+    O.from_arxiv = lambda aid: {"arxiv_id": aid, "title": "Notes on Imaginary Entropy", "year": 2020, "first_author": "Mustermann",
+                                "authors": ["Max Mustermann"], "journal": "arXiv", "journal_short": "arXiv", "source": "arxiv"}
+    O._embed = lambda texts: [None] * len(texts)
+    O._run_text, O._ptext, O._vocr = (lambda cmd, timeout: (long + "\f", None)), (lambda: "ptext"), (lambda: None)
+    recs = lambda: {r["filename"]: r for r in map(json.loads, open(O.INDEX))}
+    def run(fn, *a):
+        O.sys.argv = ["organize.py", fn.__name__] + list(a)
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                fn()
+            return "ok", out.getvalue() + err.getvalue()
+        except SystemExit as e:
+            return "exit", out.getvalue() + err.getvalue() + str(e)
+    try:
+        # 見ないフォルダ: DB の config.json の exclude(渡したフォルダの直下の名前)
+        O.BOOKS, O.EXCLUDE = True, ["その他", "errata"]
+        got = [os.path.relpath(p, lib) for p in O._new_pdfs(lib, set())]
+        assert "keep/in.pdf" in got and not [p for p in got if p.startswith(("その他", "errata"))] and len(got) == len(layer) + 1, \
+            "exclude のフォルダの PDF を拾った、またはほかのフォルダを落とした: %s" % got
+        O.EXCLUDE = []
+        assert len(O._new_pdfs(lib, set())) == len(layer) + 3, "exclude が空なのにフォルダを落とした"
+        O.EXCLUDE = ["その他", "errata", "keep"]
+        # 同定: add で一通り(索引 → 報告 → 改名の予定 → 全頁の本文 → 検索の索引)
+        st, out = run(O.add, lib)
+        assert st == "ok", "書籍の DB の add が止まった: %s" % out[-400:]
+        R = recs()
+        w = R["Writer - Imaginary Optics 3rd ed 2009.pdf"]
+        assert (w["rung"], w["isbn"], w["title"], w["first_author"], w["year"], w["doi"], w["source"], w["isbn_page"], w["page_year"], w["page_edition"]) \
+            == ("isbn", W, "Imaginary Optics", "Writer", 2008, "10.9999/imaginary-optics", "crossref", 4, 2009, 2), \
+            "著作権の頁の ISBN で同定した記録が違う: %s" % {k: v for k, v in w.items() if k != "text"}
+        assert w["isbns"] == [W] and not any(V in u for u in asked if "Writer" not in u and "filter=isbn:" + V in u and False), "関連書の頁の ISBN を使った"
+        s = R["scan.pdf"]
+        assert ("scan.pdf", 1, O.BOOK_OCR) in ocred and s["rung"] == "isbn" and s["ocr"] is True, "文字の層が乏しく ISBN も無いファイルを、先頭を OCR して探し直していない"
+        assert not [x for x in ocred if x[0] != "scan.pdf"], "文字の層があるファイルまで OCR した: %s" % ocred
+        assert R["supp.pdf"]["rung"] == "isbn", "本の記録に、論文の補足資料の判定を当てた"
+        assert R["supp.pdf"]["isbns"] == ["9780000000026", W] and R["supp.pdf"]["isbn"] == W, "著作権の頁の 2 つ目の ISBN で引いていない: %s" % R["supp.pdf"].get("isbns")
+        assert (R["ten.pdf"]["rung"], R["ten.pdf"]["doi"], R["ten.pdf"]["isbn"]) == ("isbn", "10.1/ten", "9780000000064"), \
+            "13 桁で無いとき、10 桁の形で引き直していない: %s" % {k: v for k, v in R["ten.pdf"].items() if k != "text"}
+        assert R["ten.pdf"]["year"] == 1990 and O.renamable(R["ten.pdf"]), "目録に年が無いとき、著作権の頁の年を使っていない"
+        assert R["2101.00001.pdf"]["rung"] == "unresolved" and "kind" not in R["2101.00001.pdf"], "arXiv の記録を、本文で裏を取らずに採った"
+        j = R["wasyo.pdf"]
+        assert (j["rung"], j["source"], j["title"], j["first_author"], j["year"], j["isbn_page"]) == ("isbn", "ndl", "架空太郎のC++入門", "架空", 2019, 2), \
+            "和書(9784)を国立国会図書館で引いていない: %s" % {k: v for k, v in j.items() if k != "text"}
+        n_ = R["nois.pdf"]
+        assert n_["rung"] == "unresolved" and n_["why_not"].startswith("no ISBN") and n_["title_guess"] == "nois", "ISBN の無い本を未同定にしていない"
+        assert R["wrong.pdf"]["rung"] == "unresolved" and "not in the PDF" in R["wrong.pdf"]["why_not"] and R["wrong.pdf"]["isbn_seen"] == [W], \
+            "目録の表題が PDF に無いのに採った"
+        fl = R["fail.pdf"]
+        assert fl["rung"] == "error" and fl["fetch_failed"] and O.retryable(fl), "目録に届かなかった記録を、取り直す記録にしていない"
+        a = R["2101.00002v4.pdf"]
+        assert a["rung"] == "arxiv_text" and a["kind"] == "bookpart" and "not_paper" not in a, "arXiv のプレプリントを書籍(部分)にしていない"
+        listed = out.split("Not identified")[1].split("===")[0]
+        assert "Not identified: 3 record(s)" in out and "nois.pdf" in listed and "wrong.pdf" in listed and "fail.pdf" not in listed \
+            and "no ISBN on a copyright page" in listed, \
+            "add が、同定できなかった本を知らせていない(取り直す記録は入れない): %s" % out[-600:]
+        assert os.path.exists(O.DB) and all(os.path.exists(f(n)) for n in layer), "検索の索引を作っていない、またはファイルを動かした"
+        assert not os.path.exists(os.path.join(root, "_論文以外")) and "重複" not in out, "書籍の DB で、重複の集約か論文以外の移動を走らせた"
+        O.sys.argv = ["organize.py", "search", "imaginary"]
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            O.search()
+        assert "Wiley" in buf.getvalue() or "wiley" in buf.getvalue(), "検索の一覧の誌名の欄に出版社が出ない: %s" % buf.getvalue()
+        buf = io.StringIO()
+        O.sys.argv = ["organize.py", "search", "nois", "--kind=book"]
+        with contextlib.redirect_stdout(buf):
+            O.search()
+        assert "nois" in buf.getvalue(), "未同定の本を、ファイル名(表題の欄)で検索できない: %s" % buf.getvalue()
+        # 止めるもの: 重複の集約・論文以外の移動
+        for fn in (O.dedup, O.nonpaper):
+            assert run(fn, "--apply")[0] == "exit" and run(fn)[0] == "exit" and all(os.path.exists(f(n)) for n in layer), \
+                "書籍の DB で papers %s が動いた" % fn.__name__
+        # 種類: nonpaper-ok は同定済みの記録にも付ける
+        marks = os.path.join(root, "ok.tsv")
+        open(marks, "w").write("%s\tc\n%s\tb\n" % (s["path"], n_["path"]))
+        assert run(O.nonpaper_ok, marks)[0] == "ok"
+        R = recs()
+        assert (R["scan.pdf"]["kind"], R["scan.pdf"]["not_paper"]) == ("bookpart", "user") and O.kind_group(R["scan.pdf"]) == "book", \
+            "同定済みの記録に書籍(部分)を付けられない"
+        assert O.needs_human(R["nois.pdf"]) and R["nois.pdf"]["kind"] == "book", "人が「本」と付けた未同定の記録が、人手行きから消えた"
+        # 人が決める: review は候補を出し、書いた番号を残す。merge は番号で引いて書く
+        st, out = run(O.review)
+        rows = O._tsv_rows(O.REVIEW_TSV)
+        assert st == "ok" and sorted(r["file"] for r in rows) == ["2101.00001.pdf", "nois.pdf", "wrong.pdf"], "review の表に、同定できなかった記録だけが並んでいない: %s" % out
+        assert not misplaced, "検索の語を URL の末尾に置いていない: %s" % misplaced[:1]
+        assert "ISBN printed in the PDF: " + W in [r for r in rows if r["file"] == "wrong.pdf"][0]["candidates"], "採らなかった ISBN を、表に出していない"
+        cand = [r for r in rows if r["file"] == "nois.pdf"][0]["candidates"]
+        assert "Imaginary Optics" in cand and "Body Text" not in cand and "Quantum Chaos" not in cand, \
+            "候補: 表題と著者の姓の両方が PDF にあるものだけを出していない: %s" % cand
+        import csv
+        def edit(path, fn, **how):                          # 表の各行(見出しも)の列を書き換える。fn が None を返した行は消す。利用者が表計算で直すのと同じ
+            rows = [fn(r) for r in csv.reader(open(path, newline="", encoding="utf-8-sig"), dialect="excel-tab")]
+            with open(path, "w", newline="", encoding=how.pop("encoding", "utf-8")) as out:
+                csv.writer(out, **dict({"dialect": "excel-tab", "lineterminator": "\n"}, **how)).writerows(r for r in rows if r is not None)
+        col = O.BOOK_REVIEW_COLS.index
+        edit(O.REVIEW_TSV, lambda c: [W if c[col("file")] == "nois.pdf" else "978-0-00-000001-8" if c[col("file")] == "wrong.pdf" else c[0]] + c[1:])
+        assert run(O.review)[0] == "ok" and {r["file"]: r["isbn"] for r in O._tsv_rows(O.REVIEW_TSV)} == {"2101.00001.pdf": "", "nois.pdf": W, "wrong.pdf": "978-0-00-000001-8"}, \
+            "review を作り直すと、書いた ISBN が消える"
+        before = len(glob.glob(os.path.join(root, "backups", "*-before-merge.jsonl")))
+        st, out = run(O.book_merge)
+        R = recs()
+        assert (R["nois.pdf"]["rung"], R["nois.pdf"]["isbn"], R["nois.pdf"]["first_author"], R["nois.pdf"]["fixed_by"]) == ("manual", W, "Writer", "user") \
+            and "why_not" not in R["nois.pdf"] and not O.needs_human(R["nois.pdf"]), "merge が、書いた ISBN で引いた記録を書いていない: %s" % out
+        assert R["wrong.pdf"]["rung"] == "unresolved" and "not a valid ISBN" in out and "1 record(s) written, 1 not written" in out, \
+            "検査数字の合わない ISBN で書いた、または書かなかった理由を出していない: %s" % out
+        assert len(glob.glob(os.path.join(root, "backups", "*-before-merge.jsonl"))) == before + 1, "merge が、書く前に索引を退避していない"
+        edit(O.REVIEW_TSV, lambda c: ([V] if c[col("file")] == "wrong.pdf" else [c[0]]) + c[1:])
+        st, out = run(O.book_merge)
+        assert recs()["wrong.pdf"]["rung"] == "unresolved" and "could not reach" in out, "目録に届かなかったのに書いた: %s" % out
+        edit(O.REVIEW_TSV, lambda c: (["", "10.9999/imaginary-optics.ch1"] if c[col("file")] == "wrong.pdf" else c[:2]) + c[2:])
+        st, out = run(O.book_merge)
+        assert recs()["wrong.pdf"]["rung"] == "unresolved" and "not a whole book" in out, "章の DOI を、本の全体として書いた: %s" % out
+        edit(O.REVIEW_TSV, lambda c: (["", "10.9999/imaginary-optics"] if c[col("file")] == "wrong.pdf" else c[:2]) + c[2:])
+        st, out = run(O.book_merge)
+        assert recs()["wrong.pdf"]["doi"] == "10.9999/imaginary-optics" and recs()["wrong.pdf"]["rung"] == "manual", "merge が DOI で引いた本を書いていない: %s" % out
+        # 書いた行は、merge をやり直しても書き直さない(表は merge の後も残る)
+        before = len(glob.glob(os.path.join(root, "backups", "*-before-merge.jsonl")))
+        index1 = open(O.INDEX).read()
+        st, out = run(O.book_merge)
+        assert "0 record(s) written" in out and open(O.INDEX).read() == index1 \
+            and len(glob.glob(os.path.join(root, "backups", "*-before-merge.jsonl"))) == before, "もう書いた行を、merge のやり直しで書き直した: %s" % out
+        # 名前: 表を作る(動かさない) → 利用者が著者・表題・版・年を直す → 適用。表の値は、目録の項目とは別に記録に書く
+        index0 = open(O.INDEX).read()
+        if os.path.exists(O.RENAME_TSV):
+            os.remove(O.RENAME_TSV)                         # add が作った表を消して、表が無いときの --apply を見る
+        assert run(O.rename, "--apply")[0] == "exit" and open(O.INDEX).read() == index0, "改名の表が無いのに適用した"
+        st, out = run(O.rename)
+        rows = {r["current_name"]: r for r in O._tsv_rows(O.RENAME_TSV)}
+        wn = "Writer - Imaginary Optics 3rd ed 2009.pdf"
+        assert st == "ok" and open(O.INDEX).read() == index0 and all(os.path.exists(f(n)) for n in layer), "rename の予定が、索引かファイルを変えた"
+        assert sorted(rows) == sorted(["nois.pdf", wn, "wrong.pdf", "supp.pdf", "wasyo.pdf", "ten.pdf"]), \
+            "改名の表に、部分(scan)・プレプリント・未同定が入っている、または本が抜けた: %s" % sorted(rows)
+        assert (rows[wn]["edition"], rows[wn]["year"], rows[wn]["new_name"]) == ("3", "2009", "Writer - Imaginary Optics (3rd ed, 2009).pdf"), \
+            "版と年の初期値(いまのファイル名に書いてある値が、著作権の頁の値より先)が違う: %s" % rows[wn]
+        assert (rows["supp.pdf"]["edition"], rows["supp.pdf"]["year"]) == ("2", "2009"), "ファイル名に無いときの初期値(著作権の頁の版と年)が違う: %s" % rows["supp.pdf"]
+        assert (rows["nois.pdf"]["edition"], rows["nois.pdf"]["year"]) == ("", "2008"), "ファイル名にも著作権の頁にも無いときの初期値(版は空、年は目録)"
+        rc = O.RENAME_COLS.index
+        name = lambda c: c[rc("current_name")]
+        # 利用者の直し: nois と supp は版を空に・年を 2009 に(2 冊が同じ名前になる)、wrong は著者と表題
+        edit(O.RENAME_TSV, lambda c: c[:2] + ["", "2009"] + c[4:] if name(c) in ("nois.pdf", "supp.pdf") else c)
+        st, out = run(O.rename)
+        assert {r["current_name"]: (r["edition"], r["year"], r["new_name"]) for r in O._tsv_rows(O.RENAME_TSV)}["nois.pdf"] \
+            == ("", "2009", "Writer - Imaginary Optics (2009).pdf"), "rename の予定を出し直すと、利用者が直した版と年が消える"
+        for bad in (["x", "2009"], ["2", "12"]):            # 数字でない版・4 桁でない年
+            good = open(O.RENAME_TSV).read()
+            edit(O.RENAME_TSV, lambda c: c[:2] + bad + c[4:] if name(c) == "wrong.pdf" else c)
+            assert run(O.rename, "--apply")[0] == "exit" and all(os.path.exists(f(n)) for n in layer), "版・年の書式が違う表で適用した: %s" % bad
+            open(O.RENAME_TSV, "w").write(good)
+        good = open(O.RENAME_TSV).read()
+        open(O.RENAME_TSV, "a").write(good.splitlines()[1] + "\n")     # 同じパスの行が 2 つ
+        assert run(O.rename, "--apply")[0] == "exit" and all(os.path.exists(f(n)) for n in layer), "同じパスが 2 行ある表で適用した"
+        open(O.RENAME_TSV, "w").write(good)
+        edit(O.RENAME_TSV, lambda c: c[:3] + c[4:])         # year の列を消した表: 全部の本から年を外さない
+        assert run(O.rename, "--apply")[0] == "exit" and all(os.path.exists(f(n)) for n in layer), "直す列の無い表で適用した"
+        open(O.RENAME_TSV, "w").write(good)
+        edit(O.RENAME_TSV, lambda c: c, delimiter=",")      # カンマ区切りで保存した表: 列が見つからないので止まる(初期値で改名しない)
+        assert run(O.rename, "--apply")[0] == "exit" and run(O.rename)[0] == "exit" and all(os.path.exists(f(n)) for n in layer) \
+            and open(O.INDEX).read() == index0, "カンマ区切りで保存した表を、何も直していない表として読んだ"
+        open(O.RENAME_TSV, "w").write(good)
+        st, out = run(O.add, lib)                           # 読めない表があっても、add は全頁の本文と検索の索引まで進む
+        edit(O.RENAME_TSV, lambda c: c[:2] + ["x"] + c[3:] if name(c) == "wrong.pdf" else c)
+        st, out = run(O.add, lib)
+        assert st == "ok" and "rename plan skipped" in out, "読めない改名の表で、add が止まった: %s" % out[-300:]
+        open(O.RENAME_TSV, "w").write(good)
+        # 表計算で保存し直した形(全部の欄を引用符で囲む、CRLF、BOM)。ten の行は消す(改名しない)
+        edit(O.RENAME_TSV, lambda c: None if name(c) == "ten.pdf" else ["Writer & Co", "Imaginary Optics Revisited", ""] + c[3:] if name(c) == "wrong.pdf" else c,
+             quoting=csv.QUOTE_ALL, lineterminator="\r\n", encoding="utf-8-sig")
+        before = len(glob.glob(os.path.join(root, "backups", "*-before-rename.jsonl")))
+        st, out = run(O.rename, "--apply")
+        R = recs()
+        new = "Writer - Imaginary Optics (2009).pdf"
+        assert st == "ok" and os.path.exists(f(new)) and not os.path.exists(f("nois.pdf")) and R[new]["path"] == f(new), \
+            "書籍の改名が、ファイルと索引を一緒に動かしていない(引用符・CRLF・BOM つきの表): %s" % out
+        assert (R[new]["name_edition"], R[new]["name_year"], R[new]["year"], bool(R[new]["named_at"])) == (None, 2009, 2008, True) and O.renamable(R[new]), \
+            "表で確かめた版と年を記録に書いていない、または目録の年を書き換えた"
+        assert os.path.exists(f("scan.pdf")) and os.path.exists(f("2101.00002v4.pdf")), "部分・プレプリントを改名した"
+        assert os.path.exists(f("ten.pdf")) and "named_at" not in R["ten.pdf"] and "1 record(s) have no row" in out, "表から行を消した記録を、初期値で改名した: %s" % out
+        wr2 = "Writer & Co - Imaginary Optics Revisited (2008).pdf"
+        assert wr2 in R and os.path.exists(f(wr2)) and (R[wr2]["name_author"], R[wr2]["name_title"]) == ("Writer & Co", "Imaginary Optics Revisited") \
+            and R[wr2]["title"] == "Imaginary Optics", "表で直した著者・表題を、名前と記録(name_author・name_title)に書いていない: %s" % sorted(R)
+        assert len(glob.glob(os.path.join(root, "backups", "*-before-rename.jsonl"))) == before + 1, "書籍の改名が、動かす前に索引を退避していない"
+        wr = [n for n in R if n.startswith("Writer - Imaginary Optics (2009)")]
+        assert len(wr) == 2 and all(os.path.exists(f(n)) for n in wr) and len({r["path"] for r in R.values()}) == len(R), \
+            "同じ名前になる 2 冊(nois と supp)を、上書きした・同じパスにした: %s" % sorted(R)
+        ja = "架空 - 架空太郎のC++入門 (2019).pdf"
+        assert ja in R, "和書の名前: %s" % sorted(R)
+        st, out = run(O.rename)                             # 適用した記録は、確かめた値のまま(supp の版が、著作権の頁の 2 に戻らない)
+        assert "1 rename" in out and "Tenner - Ten Digit Book (1990).pdf" in out and "2nd ed" not in out, "適用した後の予定が違う: %s" % out[:400]
+        # 名前は変わらず、版だけを直す(1 版は名前に出ない): 動かすものが無くても、退避してから記録に書く。undo は勧めない
+        edit(O.RENAME_TSV, lambda c: None if name(c) == "ten.pdf" else c[:2] + ["1"] + c[3:] if name(c) == ja else c, encoding="utf-16")   # UTF-16 で保存した表
+        before = len(glob.glob(os.path.join(root, "backups", "*-before-rename.jsonl")))
+        time.sleep(1.1)                                     # 退避の名前は秒まで
+        st, out = run(O.rename, "--apply")
+        assert st == "ok" and recs()[ja]["name_edition"] == 1 and os.path.exists(f(ja)), "名前が変わらない版の直しを、記録に書いていない: %s" % out[-300:]
+        assert len(glob.glob(os.path.join(root, "backups", "*-before-rename.jsonl"))) == before + 1, "動かすものが無い版の直しを、退避せずに書いた"
+        assert "No file was moved" in out and "undo" not in out, "何も動かしていないのに undo を勧めた(前の改名が戻る): %s" % out[-300:]
+        # 大小文字だけを直した表題: その場では変えない。_2 も付けない
+        run(O.rename)
+        edit(O.RENAME_TSV, lambda c: None if name(c) == "ten.pdf" else c[:1] + ["imaginary optics revisited"] + c[2:] if name(c) == wr2 else c)
+        st, out = run(O.rename, "--apply")
+        assert st == "ok" and os.path.exists(f(wr2)) and not glob.glob(os.path.join(lib, "*evisited*_2.pdf")) and "letter case" in out, \
+            "大小文字だけが違う名前へ、_2 を付けて改名した: %s" % out[-300:]
+        assert run(O.undo)[0] == "ok" and os.path.exists(f("nois.pdf")) and not os.path.exists(f(new)), "書籍の改名を undo で戻せない"
+    finally:
+        for k, v in saved.items():
+            setattr(O, k, v)
+    print("X ok: 書籍の DB は、exclude のフォルダを見ない、著作権の頁の ISBN を本の種類で引く、表題が PDF に無ければ採らない、層が乏しければ OCR、"
+          "届かなければ取り直す、同定できなかった本を知らせる、重複の集約と論文以外の移動をしない、review・merge で人が決める、改名は表を直してから")
+
+
 if __name__ == "__main__":
     check_static()
+    check_pointers()
     with tempfile.TemporaryDirectory() as d:
         check_crash(d)
         check_conflict(d)
@@ -1339,4 +1787,6 @@ if __name__ == "__main__":
         check_overwrite(d)
         check_search_db(d)
         check_fulltext(d)
+        check_remove_send(d)
+        check_books(d)
     print("index_check: ok")
