@@ -9,3 +9,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 getrandom = "0.3"
+
+[features]
+# 配る形(bundle.sh)で付ける。付けないと Tauri は開発用の作りになり、起動時に Dock の絵を icons/icon.png で上書きする
+custom-protocol = ["tauri/custom-protocol"]

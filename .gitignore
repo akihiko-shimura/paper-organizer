@@ -18,6 +18,10 @@ review.html
 review-ok.tsv
 nonpaper.html
 nonpaper-ok.tsv
+nonpaper-*.html
+nonpaper-*.tsv
+unresolved-*.html
+books-ok*.tsv
 dedup-keep.txt
 renames-*.jsonl
 dedup-*.jsonl
